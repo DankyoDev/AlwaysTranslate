@@ -25,8 +25,6 @@ export interface ChannelConfig {
     /** Language my outgoing messages are translated to. undefined = inherit */
     outgoingLang?: string;
     outgoing?: boolean;
-    /** Per scope glossary merged over the global dictionary */
-    glossary?: Record<string, string>;
 }
 
 /**
@@ -43,7 +41,6 @@ export interface ScopeConfig {
     outgoing?: boolean;
     aiPrompt?: string;
     outgoingPrompt?: string;
-    glossary?: Record<string, string>;
 }
 
 export interface UserScopeConfig {
@@ -65,10 +62,6 @@ export const settings = definePluginSettings({
     ui_githubLink: {
         type: OptionType.COMPONENT,
         name: "GitHub Link",
-        component: (): ReactNode => null,
-    },
-    ui_overview: {
-        type: OptionType.COMPONENT,
         component: (): ReactNode => null,
     },
     header_translation: {
@@ -100,17 +93,6 @@ export const settings = definePluginSettings({
         description: "Motor por defecto. Los overrides por canal se aplican aparte. Google no necesita clave.",
         options: GLOBAL_ENGINE_OPTIONS.map(o => ({ ...o, label: o.value === "disable" ? "Desactivado" : o.label, default: o.value === "google" })),
     },
-    manualTranslationEngine: {
-        type: OptionType.SELECT,
-        default: "google",
-        displayName: "Motor del botón manual",
-        description: "Motor del botón «Traducir ahora». Google no necesita clave.",
-        options: GLOBAL_ENGINE_OPTIONS.map(o => ({ ...o, label: o.value === "disable" ? "Desactivado" : o.label, default: o.value === "google" })),
-    },
-    deeplApiKey: {
-        type: OptionType.CUSTOM,
-        default: "",
-    },
     ui_apiKeys: {
         type: OptionType.COMPONENT,
         name: "API Keys",
@@ -123,7 +105,7 @@ export const settings = definePluginSettings({
     },
     geminiModel: {
         type: OptionType.CUSTOM,
-        default: "gemini-2.5-flash-lite",
+        default: "gemini-3.5-flash-lite",
     },
     deepseekApiKey: {
         type: OptionType.CUSTOM,
@@ -147,11 +129,11 @@ export const settings = definePluginSettings({
     },
     APIEcoModeThreshold: {
         type: OptionType.CUSTOM,
-        default: 3,
+        default: 1,
     },
     APIMaxBatchWait: {
         type: OptionType.CUSTOM,
-        default: 10,
+        default: 0,
     },
 
     header_management: {
@@ -193,7 +175,7 @@ export const settings = definePluginSettings({
     },
     previewOutgoing: {
         type: OptionType.BOOLEAN,
-        default: false,
+        default: true,
         displayName: "Previsualizar antes de enviar",
         description: "Muestra el texto traducido en el chat antes de enviarlo.",
     },
@@ -211,24 +193,6 @@ export const settings = definePluginSettings({
         description: "No traducir mensajes que empiecen por esto.",
     },
 
-    header_dictionary: {
-        type: OptionType.COMPONENT,
-        component: (): ReactNode => null,
-    },
-    customDictionary: {
-        type: OptionType.CUSTOM,
-        default: {} as Record<string, string>,
-    },
-    dictionaryCaseSensitive: {
-        type: OptionType.BOOLEAN,
-        default: false,
-        displayName: "Diccionario sensible a mayúsculas",
-        description: "Distinguir mayúsculas y minúsculas.",
-    },
-    dictionaryManager: {
-        type: OptionType.COMPONENT,
-        component: (): ReactNode => null,
-    },
 
     header_design: {
         type: OptionType.COMPONENT,
@@ -294,6 +258,34 @@ export const settings = definePluginSettings({
 
 export function getChannelEntry(channelId: string): ChannelConfig | undefined {
     return settings.plain.channelList.find(c => c.id === channelId);
+}
+
+/** Channel entry plus whether automatic translation applies to it (used by the upstream modules). */
+export function getChannelConfig(channelId: string): {
+    allowed: boolean;
+    config: ChannelConfig | null;
+} {
+    const config = getChannelEntry(channelId) ?? null;
+    return {
+        allowed: settings.plain.translationMode === "global" || !!config,
+        config,
+    };
+}
+
+/** Turns engines that no longer exist in this build into "disable". */
+export function normalizeTranslationEngines() {
+    const supported = new Set(GLOBAL_ENGINE_OPTIONS.map(option => option.value));
+    if (!supported.has(settings.store.translationEngine)) settings.store.translationEngine = "disable";
+
+    const channelList = settings.store.channelList;
+    const hasRemoved = channelList.some(c => c.engine && c.engine !== "default" && !supported.has(c.engine));
+    if (!hasRemoved) return;
+
+    settings.store.channelList = channelList.map(channel =>
+        channel.engine && channel.engine !== "default" && !supported.has(channel.engine)
+            ? { ...channel, engine: "disable" }
+            : channel
+    );
 }
 
 /** Immutably update a single channel's properties. */
@@ -371,3 +363,4 @@ export function clearUserScope(userId: string, kind: "dm" | "guild") {
 
     settings.store.userOverrides = userOverrides;
 }
+

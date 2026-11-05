@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { useEffect, useState } from "@webpack/common";
+import { useEffect, useRef, useState } from "@webpack/common";
 
 import { safeTranslate } from "../api/translate";
 import { TranslationCache } from "../utils/cache";
@@ -20,17 +20,12 @@ interface UseTranslationExecutionProps {
     resolvedTarget: string;
     shouldTranslateContent: boolean;
     allowed: boolean;
-    isManual: boolean;
     skipMessage: boolean;
-    deeplApiKey?: string;
     geminiApiKey?: string;
     deepseekApiKey?: string;
+    customPrompt?: string;
     cachedTranslated: string | undefined;
     cacheRevision: number;
-    aiPrompt: string;
-    glossary: Record<string, string>;
-    /** Only start translating once the message is near the viewport */
-    enabled: boolean;
 }
 
 /**
@@ -46,148 +41,140 @@ export function useTranslationExecution({
     resolvedTarget,
     shouldTranslateContent,
     allowed,
-    isManual,
     skipMessage,
-    deeplApiKey,
     geminiApiKey,
     deepseekApiKey,
+    customPrompt,
     cachedTranslated,
-    cacheRevision,
-    aiPrompt,
-    glossary,
-    enabled
+    cacheRevision
 }: UseTranslationExecutionProps) {
     const [translatedText, setTranslatedText] = useState<string | null>(cachedTranslated ?? null);
     const [isTranslating, setIsTranslating] = useState(false);
 
-    // Sync state if cache updates synchronously (e.g. from manual batch)
+    const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
+    const [retryVersion, setRetryVersion] = useState(0);
+    const inFlight = useRef(false);
+    const requestKey = cacheKey + ":" + messageId;
+
+    // Sync state when a cached translation becomes available
     useEffect(() => {
+        if (cachedTranslated && allowed && currentEngine !== "disable") {
+            const cache = TranslationCache.getInstance();
+            if (cache.get(cacheKey) === cachedTranslated) cache.rememberDisplayed(channelId, messageId, content, resolvedTarget, cacheKey);
+        }
         if (cachedTranslated && translatedText !== cachedTranslated) {
             setTranslatedText(cachedTranslated);
             setIsTranslating(false);
+            setFailure(null);
         }
-    }, [cachedTranslated]);
+    }, [cachedTranslated, cacheKey, allowed, currentEngine, channelId, messageId, content, resolvedTarget]);
 
     useEffect(() => {
+        setFailure(null);
+        inFlight.current = false;
         // If we already have the text from cache, we don't need to fetch
         if (cachedTranslated) {
-            Logger.debug("Execute", "cache hit", { messageId, chars: cachedTranslated.length });
             return;
         }
 
-        // Lazy loading: wait until the message is close to the viewport
-        if (!enabled) {
-            Logger.debug("Execute", "waiting for viewport", { messageId });
-            setIsTranslating(false);
-            return;
-        }
-
-        const skipReason = !content ? "empty content"
-            : (!allowed && !isManual) ? "scope disabled"
-                : skipMessage ? "own/optimistic/empty message"
-                    : !shouldTranslateContent ? "shouldTranslate=false (already target language or ignored)"
-                        : currentEngine === "disable" ? "engine disabled"
-                            : null;
-
-        if (skipReason) {
-            Logger.debug("Execute", "skipped", { messageId, reason: skipReason, engine: currentEngine, targetLang: resolvedTarget });
+        if (!content || !allowed || skipMessage || !shouldTranslateContent || currentEngine === "disable") {
             setIsTranslating(false);
             setTranslatedText(null);
             return;
         }
 
-        Logger.debug("Execute", "evaluate", {
-            messageId,
-            channelId,
-            engine: currentEngine,
-            sourceLang,
-            targetLang: resolvedTarget,
-            manual: isManual,
-            allowed,
-            visible: enabled,
-            cacheKey,
-        });
-
         let cancelled = false;
-        let timeoutId: NodeJS.Timeout;
 
         const run = async () => {
             if (cancelled) return;
 
             setTranslatedText(null);
+            inFlight.current = true;
 
             const cache = TranslationCache.getInstance();
-            const generation = cache.getGeneration(cacheKey);
-            let promise = TranslationCache.getInstance().getPending(cacheKey, content);
-            if (promise) {
-                Logger.debug("Execute", "reusing in-flight request", { messageId });
-            } else {
-                Logger.debug("Execute", "requesting translation", { messageId, chars: content.length, engine: currentEngine });
+            const generation = cache.watchGeneration(cacheKey);
+            let promise = cache.getPending(cacheKey, content);
+            if (!promise) {
                 promise = safeTranslate(
                     content,
                     sourceLang,
                     resolvedTarget,
                     currentEngine,
-                    { deepl: deeplApiKey || "", gemini: geminiApiKey || "", deepseek: deepseekApiKey || "" },
+                    { gemini: geminiApiKey || "", deepseek: deepseekApiKey || "" },
                     channelId,
                     messageId,
-                    isManual,
-                    aiPrompt,
-                    glossary
+                    customPrompt
                 );
-                TranslationCache.getInstance().setPending(cacheKey, content, promise);
+                cache.setPending(cacheKey, content, promise);
             }
 
             setIsTranslating(true);
             try {
                 const result = await promise;
-                if (cache.getGeneration(cacheKey) !== generation) return;
+                if (!generation.isCurrent()) return;
                 if (result) cache.set(cacheKey, result, currentEngine);
-                Logger.debug("Execute", "result", { messageId, translated: !!result, chars: result?.length ?? 0 });
-                if (!cancelled) setTranslatedText(result);
+                if (!cancelled) {
+                    if (result) cache.rememberDisplayed(channelId, messageId, content, resolvedTarget, cacheKey);
+                    setTranslatedText(result);
+                }
             } catch (e) {
                 Logger.warn("Translate", "Translation request failed", e);
+                if (!cancelled && generation.isCurrent()) setFailure({ key: requestKey, message: e instanceof Error ? e.message : "Translation failed" });
             } finally {
-                if (!cancelled) setIsTranslating(false);
+                generation.release();
+                if (!cancelled) {
+                    inFlight.current = false;
+                    setIsTranslating(false);
+                }
             }
         };
 
-        // Scroll debounce: skip API calls if user scrolls past message quickly
-        if (currentEngine === "deepl") {
-            timeoutId = setTimeout(run, 500);
-        } else if (currentEngine === "google") {
-            // Free endpoint, avoid bursting a whole channel at once
-            timeoutId = setTimeout(run, 200);
-        } else {
-            run();
-        }
+        run();
 
         return () => {
             cancelled = true;
-            if (timeoutId) clearTimeout(timeoutId);
+            inFlight.current = false;
         };
     }, [
         cacheKey,
+        requestKey,
+        retryVersion,
         cacheRevision,
         content,
         allowed,
-        isManual,
         resolvedTarget,
         currentEngine,
         sourceLang,
-        deeplApiKey,
         geminiApiKey,
         deepseekApiKey,
+        customPrompt,
         skipMessage,
         shouldTranslateContent,
         cachedTranslated,
         channelId,
-        messageId,
-        enabled
+        messageId
     ]);
+
+    useEffect(() => {
+        if (!failure || failure.key !== requestKey || translatedText) return;
+        const retryFailed = () => {
+            if (inFlight.current || !allowed || skipMessage || !shouldTranslateContent || currentEngine === "disable") return;
+            inFlight.current = true;
+            setFailure(null);
+            setRetryVersion(version => version + 1);
+        };
+        const event = "bat-retry-failed-" + channelId;
+        window.addEventListener(event, retryFailed);
+        return () => window.removeEventListener(event, retryFailed);
+    }, [failure, requestKey, translatedText, channelId, allowed, skipMessage, shouldTranslateContent, currentEngine]);
 
     return {
         translatedText,
-        isTranslating
+        isTranslating,
+        error: !translatedText && failure?.key === requestKey ? failure.message : null,
+        retry: () => {
+            if (inFlight.current || failure?.key !== requestKey || !allowed || skipMessage || !shouldTranslateContent || currentEngine === "disable") return;
+            window.dispatchEvent(new Event("bat-retry-failed-" + channelId));
+        }
     };
 }

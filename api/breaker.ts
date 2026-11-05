@@ -22,7 +22,9 @@ function shouldShowToast(key: string, cooldown = TOAST_DEDUP_WINDOW_MS) {
         return false;
     }
 
+    recentToasts.delete(key);
     recentToasts.set(key, now);
+    if (recentToasts.size > 100) recentToasts.delete(recentToasts.keys().next().value!);
     return true;
 }
 
@@ -133,6 +135,7 @@ function writeGeminiQuotaState(apiKey: string, state: GeminiQuotaLockState) {
 }
 
 export function clearGeminiQuotaState(apiKey: string) {
+    if (!(apiKey in getGeminiQuotaLocks())) return;
     const locks = { ...getGeminiQuotaLocks() };
     delete locks[apiKey];
     settings.store.geminiQuotaLocks = locks;
@@ -173,9 +176,8 @@ export function describeGeminiQuotaLock(kind: GeminiQuotaKind, until: number) {
     return `Rate limited (${formatDurationShort(until - Date.now())})`;
 }
 
-export function showGeminiQuotaToast(kind: GeminiQuotaKind, until: number, isManual = false) {
-    const cooldown = isManual ? 1500 : 10 * 60 * 1000;
-    showApiToast("gemini", describeGeminiQuotaLock(kind, until), cooldown);
+export function showGeminiQuotaToast(kind: GeminiQuotaKind, until: number) {
+    showApiToast("gemini", describeGeminiQuotaLock(kind, until), 10 * 60 * 1000);
 }
 
 

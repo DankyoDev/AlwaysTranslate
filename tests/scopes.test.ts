@@ -8,8 +8,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { isSameLanguage } from "../api/google";
-import { applyScopeLayers, channelToScope, glossarySignature, type ResolvedConfigBase } from "../utils/scopesPure";
-import { sanitizeTranslation } from "../utils/string";
+import { applyScopeLayers, channelToScope, type ResolvedConfigBase } from "../utils/scopesPure";
 
 function base(): ResolvedConfigBase {
     return {
@@ -21,7 +20,6 @@ function base(): ResolvedConfigBase {
         outgoing: true,
         aiPrompt: "",
         outgoingPrompt: "",
-        glossary: { gg: "buena partida" },
     };
 }
 
@@ -40,29 +38,15 @@ test("precedence: user beats channel beats server", () => {
 
 test("undefined keys inherit from the parent scope", () => {
     const resolved = applyScopeLayers(base(), [
-        ["guild", { engine: "deepl" }],
+        ["guild", { engine: "deepseek" }],
         ["channel", { outgoing: false }],
         ["user", { targetLang: "fr" }],
     ]);
 
-    assert.equal(resolved.engine, "deepl");
+    assert.equal(resolved.engine, "deepseek");
     assert.equal(resolved.outgoing, false);
     assert.equal(resolved.targetLang, "fr");
     assert.equal(resolved.sourceLang, "auto");
-});
-
-test("glossary merges global, server, channel and user", () => {
-    const resolved = applyScopeLayers(base(), [
-        ["guild", { glossary: { gg: "gg del server", wp: "bien jugado" } }],
-        ["channel", { glossary: { wp: "wp del canal" } }],
-        ["user", { glossary: { lol: "jaja" } }],
-    ]);
-
-    assert.deepEqual(resolved.glossary, {
-        gg: "gg del server",
-        wp: "wp del canal",
-        lol: "jaja",
-    });
 });
 
 test("engine disable forces enabled off", () => {
@@ -79,25 +63,6 @@ test("whitelist channels are enabled unless explicitly disabled", () => {
 test("auto source language inherits from the server scope", () => {
     assert.equal(channelToScope({ id: "1", lang: "auto" }, "global").sourceLang, undefined);
     assert.equal(channelToScope({ id: "1", lang: "en" }, "global").sourceLang, "en");
-});
-
-test("sanitizeTranslation removes AI punctuation not present in the source", () => {
-    assert.equal(sanitizeTranslation("hola — mundo", "hello world"), "hola, mundo");
-    assert.equal(sanitizeTranslation("“hola”…", "\"hello\""), "\"hola\"...");
-    assert.equal(sanitizeTranslation("hola\u00A0mundo", "hello world"), "hola mundo");
-});
-
-test("sanitizeTranslation keeps punctuation the source already had", () => {
-    assert.equal(sanitizeTranslation("hola — mundo", "hello — world"), "hola — mundo");
-    assert.equal(sanitizeTranslation("“hola”", "“hello”"), "“hola”");
-});
-
-test("glossary signature is stable regardless of insertion order", () => {
-    assert.equal(
-        glossarySignature({ b: "2", a: "1" }),
-        glossarySignature({ a: "1", b: "2" })
-    );
-    assert.notEqual(glossarySignature({ a: "1" }), glossarySignature({ a: "2" }));
 });
 
 test("isSameLanguage compares regions properly", () => {

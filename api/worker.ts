@@ -4,30 +4,40 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { BATCH_ACCUMULATION_TIME_DEEPL, BATCH_ACCUMULATION_TIME_GEMINI, DEEPL_BATCH_SIZE, GEMINI_BATCH_SIZE } from "../constants";
+import { BATCH_ACCUMULATION_TIME_GEMINI, GEMINI_BATCH_SIZE } from "../constants";
 import { settings } from "../settings";
+import { batchTranslationTasks } from "../utils/batching";
 import { Logger } from "../utils/logger";
 import { globalProgressStore } from "../utils/progressStore";
 import { APIBreaker, setGeminiQuotaLock, showApiToast, showGeminiQuotaToast } from "./breaker";
-import { translateWithDeepL } from "./deepl";
 import { translateBatchWithDeepSeek } from "./deepseek";
 import { TRANSLATION_TIMEOUT_MS } from "./errors";
 import { translateBatchWithGemini } from "./gemini";
+import { AI_REQUEST_CONCURRENCY, aiRequestLimiters } from "./requestLimiter";
 
-function limitTask(task: TranslationTask, expire: () => void) {
-    const { resolve } = task;
+function limitTask(task: TranslationTask, expire: () => void, fail: (error: Error) => void) {
+    const { resolve, reject } = task;
     let settled = false;
     const timer = setTimeout(() => {
         if (settled) return;
-        task.resolve("");
+        task.reject!(new Error("Translation timed out (60s)"));
         expire();
-        showApiToast(task.engine, "Translation timed out (20s)");
+        showApiToast(task.engine, "Translation timed out (60s)");
     }, TRANSLATION_TIMEOUT_MS);
     task.resolve = result => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         resolve(result);
+        if (!result) fail(new Error("Translation returned no result"));
+    };
+    task.reject = error => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (reject) reject(error);
+        else resolve("");
+        fail(error);
     };
 }
 
@@ -37,48 +47,32 @@ function showEngineToast(engine: string, reason: string) {
 
 export interface TranslationTask {
     id: string;
+    groupId?: string;
     messageId: string;
     channelId: string;
     text: string;
     resolve: (res: string) => void;
+    reject?: (error: Error) => void;
     targetLang: string;
     apiKey: string;
     engine: string;
     dmPrompt: string;
     status?: "QUEUED" | "PROCESSING";
-    isManual?: boolean;
-    dictMatches?: Record<string, string>;
     model?: string;
     endpoint?: string;
     context?: string;
 }
 
-export class Mutex {
-    private mutex = Promise.resolve();
-
-    acquire(): Promise<() => void> {
-        let release!: () => void;
-        const next = new Promise<void>(resolve => {
-            release = resolve;
-        });
-        const current = this.mutex;
-        this.mutex = this.mutex.then(() => next);
-        return current.then(() => release);
-    }
-}
-
-export const globalGeminiMutex = new Mutex();
-
 export type WorkerState = "IDLE" | "ACCUMULATING" | "PROCESSING";
 
-export class GeminiChannelWorker {
+export class AiChannelWorker {
     public channelId: string;
     public registry = new Map<string, TranslationTask>();
     public state: WorkerState = "IDLE";
     public deadline: number = 0;
     public leaderIds: string[] = [];
     private timer: NodeJS.Timeout | null = null;
-    private abortController: AbortController | null = null;
+    private activeBatches = new Map<AbortController, Set<string>>();
     private generation = 0;
 
     constructor(channelId: string) {
@@ -95,22 +89,27 @@ export class GeminiChannelWorker {
 
     public enqueue(task: TranslationTask) {
         limitTask(task, () => {
-            this.registry.delete(task.id);
+            this.removeTask(task.id);
             if (this.registry.size === 0) this.reset();
-        });
+        }, error => this.cancelSiblings(task, error));
         task.status = "QUEUED";
         this.registry.set(task.id, task);
-
-        Logger.debug("Worker", "enqueued", {
-            engine: task.engine,
-            messageId: task.messageId || "(outgoing)",
-            chars: task.text.length,
-            queued: this.getQueuedCount(),
-            threshold: settings.store.APIEcoModeThreshold,
-            maxWait: settings.store.APIMaxBatchWait,
-        });
-
         this.schedule();
+    }
+
+    private removeTask(id: string) {
+        this.registry.delete(id);
+        for (const [controller, ids] of this.activeBatches) {
+            if (ids.delete(id) && ids.size === 0) controller.abort();
+        }
+    }
+
+    private cancelSiblings(task: TranslationTask, error: Error) {
+        if (!task.groupId || this.registry.get(task.id) !== task) return;
+        const siblings = Array.from(this.registry.values()).filter(other => other !== task && other.groupId === task.groupId);
+        // Remove all siblings first so their rejection cannot recursively cancel the group.
+        for (const sibling of siblings) this.removeTask(sibling.id);
+        for (const sibling of siblings) sibling.reject!(error);
     }
 
     public firstMessageTime: number = 0;
@@ -125,7 +124,7 @@ export class GeminiChannelWorker {
         if (this.registry.size === 0) {
             this.state = "IDLE";
             this.firstMessageTime = 0;
-            geminiWorkers.delete(this.channelId);
+            aiWorkers.delete(this.channelId);
             return;
         }
 
@@ -161,7 +160,6 @@ export class GeminiChannelWorker {
 
         this.state = "ACCUMULATING";
 
-        const hasManual = Array.from(this.registry.values()).some(t => t.isManual && (t.status === "QUEUED" || !t.status));
 
         const ecoThreshold = settings.store.APIEcoModeThreshold ?? 1;
         const maxWaitMs = (settings.store.APIMaxBatchWait ?? 0) * 1000;
@@ -177,10 +175,7 @@ export class GeminiChannelWorker {
         let ecoProgress: number | undefined;
         let nextAction: "process" | "schedule" = "process";
 
-        if (hasManual) {
-            deadline = now + 150; // 150ms debounce for manual requests
-            ecoProgress = 1;
-        } else if (queuedCount >= GEMINI_BATCH_SIZE) {
+        if (queuedCount >= GEMINI_BATCH_SIZE) {
             deadline = now + 150; // 150ms debounce for immediate processing
             ecoProgress = 1;
         } else if (ecoThreshold > 1 && queuedCount < ecoThreshold && !this.thresholdMetTime) {
@@ -199,8 +194,8 @@ export class GeminiChannelWorker {
             ecoProgress = 1;
         }
 
-        // Reserve half the deadline for the API even in indefinite economy mode.
-        const latestDispatch = this.firstMessageTime + TRANSLATION_TIMEOUT_MS / 2;
+        // Keep economy-mode accumulation bounded independently of the request deadline.
+        const latestDispatch = this.firstMessageTime + 10_000;
         if (deadline >= latestDispatch) {
             deadline = latestDispatch;
             nextAction = "process";
@@ -228,415 +223,109 @@ export class GeminiChannelWorker {
     private async process() {
         if (this.registry.size === 0 || this.state === "PROCESSING") return;
         const { generation } = this;
-
-        const currentTasks: TranslationTask[] = [];
-        for (const t of this.registry.values()) {
-            if (t.status === "QUEUED" || !t.status) {
-                t.status = "PROCESSING";
-                currentTasks.push(t);
-            }
-        }
-
-        if (currentTasks.length === 0) return;
-
+        const currentTasks = Array.from(this.registry.values()).filter(task => task.status === "QUEUED");
+        if (!currentTasks.length) return;
+        currentTasks.forEach(task => { task.status = "PROCESSING"; });
         this.state = "PROCESSING";
         this.firstMessageTime = 0;
         this.thresholdMetTime = 0;
-
-        globalProgressStore.reset();
-
+        globalProgressStore.reset(this.channelId);
         window.dispatchEvent(new CustomEvent(`bat-gemini-fired-${this.channelId}`, {
-            detail: { taskIds: currentTasks.map(t => t.messageId) }
+            detail: { taskIds: currentTasks.map(task => task.messageId) }
         }));
 
         const grouped = new Map<string, TranslationTask[]>();
-        for (const t of currentTasks) {
-            const key = JSON.stringify([t.targetLang, t.apiKey, t.engine, t.dmPrompt, t.model, t.endpoint]);
+        for (const task of currentTasks) {
+            const key = JSON.stringify([task.targetLang, task.apiKey, task.engine, task.dmPrompt, task.model, task.endpoint]);
             if (!grouped.has(key)) grouped.set(key, []);
-            grouped.get(key)!.push(t);
+            grouped.get(key)!.push(task);
         }
-
-        for (const [key, groupTasks] of grouped.entries()) {
-            const [targetLang, apiKey, engine, dmPrompt, model, endpoint] = JSON.parse(key) as string[];
-            const reversedTasks = groupTasks.slice().reverse();
-
-            const chunks: TranslationTask[][] = [];
-            let currentChunk: TranslationTask[] = [];
-
-            for (const task of reversedTasks) {
-                if (currentChunk.length >= GEMINI_BATCH_SIZE) {
-                    chunks.push(currentChunk);
-                    currentChunk = [];
+        const order = new Map(currentTasks.map((task, index) => [task, index]));
+        const batches = Array.from(grouped.values()).flatMap(tasks => batchTranslationTasks(tasks));
+        batches.sort((a, b) => order.get(a[0])! - order.get(b[0])!);
+        const queues = [
+            batches.filter(batch => !batch[0].engine.startsWith("deepseek")),
+            batches.filter(batch => batch[0].engine.startsWith("deepseek"))
+        ];
+        await Promise.all(queues.flatMap(queue => {
+            let next = 0;
+            const consume = async () => {
+                while (next < queue.length && generation === this.generation) {
+                    await this.processBatch(queue[next++], generation);
                 }
-                currentChunk.push(task);
-            }
-            if (currentChunk.length > 0) {
-                chunks.push(currentChunk);
-            }
+            };
+            return Array.from({ length: Math.min(queue.length, AI_REQUEST_CONCURRENCY) }, consume);
+        }));
+        if (generation !== this.generation) return;
 
-            for (const chunk of chunks) {
-
-                const release = await globalGeminiMutex.acquire();
-
-                try {
-                    if (generation !== this.generation) return;
-                    if (!chunk.some(t => this.registry.get(t.id) === t)) continue;
-                    this.abortController = new AbortController();
-                    const timeoutId = setTimeout(() => this.abortController?.abort(), TRANSLATION_TIMEOUT_MS);
-
-                    try {
-                        const messagesToTranslate = chunk.filter(t => this.registry.get(t.id) === t).map(t => ({ id: t.id, text: t.text }));
-
-                        let combinedDmPrompt = dmPrompt;
-                        const chunkGlossary: Record<string, string> = {};
-                        for (const t of chunk) {
-                            if (t.dictMatches) {
-                                Object.assign(chunkGlossary, t.dictMatches);
-                            }
-                        }
-                        const glossaryKeys = Object.keys(chunkGlossary);
-                        if (glossaryKeys.length > 0) {
-                            let glossaryStr = "\n\n# User Dictionary / Glossary\nCRITICAL: You MUST strictly use the exact translations provided below for the following specific terms. Do NOT translate them differently:\n";
-                            for (const k of glossaryKeys) {
-                                glossaryStr += `- "${k}": "${chunkGlossary[k]}"\n`;
-                            }
-                            combinedDmPrompt += glossaryStr;
-                        }
-
-                        const chunkContext = chunk.find(t => t.context)?.context;
-                        const callApi = (messages: { id: string, text: string; }[]) => engine.startsWith("deepseek")
-                            ? translateBatchWithDeepSeek(
-                                this.channelId,
-                                messages,
-                                targetLang,
-                                apiKey,
-                                combinedDmPrompt,
-                                model,
-                                this.abortController!.signal,
-                                endpoint,
-                                chunkContext
-                            )
-                            : translateBatchWithGemini(
-                                this.channelId,
-                                messages,
-                                targetLang,
-                                apiKey,
-                                combinedDmPrompt,
-                                model,
-                                this.abortController!.signal,
-                                chunkContext
-                            );
-
-                        Logger.debug("Worker", "batch sending", {
-                            channelId: this.channelId,
-                            engine,
-                            model,
-                            messages: messagesToTranslate.length,
-                            ids: messagesToTranslate.map(m => m.id),
-                            contextLines: chunkContext ? chunkContext.split("\n").length : 0,
-                            glossary: Object.keys(chunkGlossary).length,
-                        });
-
-                        const fetchPromise = callApi(messagesToTranslate);
-
-                        const timeoutPromise = new Promise<any>((_, reject) => {
-                            this.abortController?.signal.addEventListener("abort", () => reject(new Error("Translation timed out (20s)")));
-                        });
-
-                        let results: { id: string; text: string; }[] = await Promise.race([fetchPromise, timeoutPromise]);
-                        if (generation !== this.generation) return;
-                        clearTimeout(timeoutId);
-
-                        Logger.debug("Worker", "batch result", { engine, messages: results.length });
-
-                        // Some models silently skip messages. Retry only the missing ones once.
-                        const returned = new Set(results.map(r => r.id));
-                        const missing = messagesToTranslate.filter(m => !returned.has(m.id));
-                        if (missing.length && missing.length < messagesToTranslate.length) {
-                            Logger.warn("Worker", "model omitted messages, retrying", {
-                                engine,
-                                missing: missing.map(m => m.id),
-                            });
-
-                            try {
-                                const retryResults = await callApi(missing);
-                                results = results.concat(retryResults);
-                            } catch (e) {
-                                Logger.warn("Worker", "retry for omitted messages failed", e);
-                            }
-                        }
-
-                        const resultMap = new Map<string, string>(results.map((r: { id: string; text: string }) => [r.id, r.text]));
-                        chunk.forEach(t => {
-                            t.resolve(resultMap.get(t.id) || "");
-                            if (this.registry.get(t.id) === t) {
-                                this.registry.delete(t.id);
-                            }
-                        });
-                    } catch (e: unknown) {
-                        clearTimeout(timeoutId);
-                        if (generation !== this.generation) return;
-
-                        const errorMsg = e instanceof Error ? e.message : String(e);
-                        const isTimeout = errorMsg.toLowerCase().includes("timeout");
-                        const isNetwork = errorMsg.toLowerCase().includes("network request failed") || errorMsg.toLowerCase().includes("fetch failed");
-
-                        Logger.error("Translate", "Gemini Batch translation error", e);
-
-                        let status: number | null = null;
-                        let errorCode: string | null = null;
-                        if (typeof e === "object" && e !== null) {
-                            if ("status" in e) status = (e as any).status;
-                            if ("code" in e) errorCode = (e as any).code;
-                        }
-
-                        const quotaKind = typeof e === "object" && e !== null && "quotaKind" in e
-                            ? (e as any).quotaKind as "rpm" | "tpm" | "rpd" | undefined
-                            : undefined;
-
-                        if (quotaKind) {
-                            const until = setGeminiQuotaLock(apiKey, quotaKind);
-                            showGeminiQuotaToast(quotaKind, until);
-                            this.reset();
-                            return;
-                        }
-
-                        const engineType = engine.startsWith("deepseek") ? "deepseek" : "gemini";
-                        const handledByBreaker = APIBreaker.reportError(engineType, apiKey, status, errorCode, errorMsg);
-
-                        if (handledByBreaker) {
-                            this.reset();
-                            return;
-                        } else if (isTimeout || isNetwork) {
-                            showEngineToast(engineType, isTimeout ? "Timeout" : "Network error");
-                        } else {
-                            const isJsonTruncated = errorMsg.toLowerCase().includes("unterminated string in json") || errorMsg.toLowerCase().includes("unexpected end of json");
-                            if (!isJsonTruncated) {
-                                showEngineToast(engineType, errorMsg.length > 80 ? errorMsg.substring(0, 80) + "..." : errorMsg || "Request failed");
-                            }
-                        }
-
-                        chunk.forEach(t => {
-                            t.resolve("");
-                            if (this.registry.get(t.id) === t) {
-                                this.registry.delete(t.id);
-                            }
-                        });
-                    } finally {
-                        clearTimeout(timeoutId);
-                        this.abortController = null;
-                    }
-                } finally {
-                    release();
-                }
-            }
-        }
-
-        const remainingQueued = this.getQueuedCount();
-        if (remainingQueued > 0) {
+        if (this.getQueuedCount() > 0) {
             this.state = "ACCUMULATING";
-            this.firstMessageTime = Date.now();
             this.thresholdMetTime = 0;
             this.schedule();
         } else {
             this.state = "IDLE";
             this.firstMessageTime = 0;
             this.thresholdMetTime = 0;
-            if (this.registry.size === 0) {
-                geminiWorkers.delete(this.channelId);
-            }
+            if (aiWorkers.get(this.channelId) === this) aiWorkers.delete(this.channelId);
         }
     }
 
-    public flushNow() {
-        if (this.timer) {
-            clearTimeout(this.timer);
-            this.timer = null;
-        }
-        if (this.getQueuedCount() > 0 && this.state !== "PROCESSING") {
-            this.process();
-        }
-    }
-
-    public reSchedule() {
-        if (this.state !== "PROCESSING" && this.getQueuedCount() > 0) {
-            this.schedule();
-        }
-    }
-
-    private clearPendingTasks() {
-        this.registry.forEach(t => t.resolve(""));
-        this.registry.clear();
-    }
-
-    public reset() {
-        this.generation++;
-        if (this.timer) clearTimeout(this.timer);
-        if (this.abortController) {
-            this.abortController.abort();
-            this.abortController = null;
-        }
-        this.clearPendingTasks();
-        this.state = "IDLE";
-        if (geminiWorkers.get(this.channelId) === this) geminiWorkers.delete(this.channelId);
-    }
-}
-
-export const geminiWorkers = new Map<string, GeminiChannelWorker>();
-
-export class DeeplChannelWorker {
-    public key: string;
-    public registry = new Map<string, TranslationTask>();
-    public state: WorkerState = "IDLE";
-    private timer: NodeJS.Timeout | null = null;
-    private abortController: AbortController | null = null;
-    private generation = 0;
-
-    constructor(key: string) {
-        this.key = key;
-    }
-
-    public getQueuedCount() {
-        let count = 0;
-        for (const t of this.registry.values()) {
-            if (t.status === "QUEUED" || !t.status) count++;
-        }
-        return count;
-    }
-
-    public enqueue(task: TranslationTask) {
-        limitTask(task, () => {
-            this.registry.delete(task.id);
-            if (this.registry.size === 0) this.reset();
-        });
-        task.status = "QUEUED";
-        this.registry.set(task.id, task);
-
-        Logger.debug("Worker", "enqueued", {
-            engine: task.engine,
-            messageId: task.messageId || "(outgoing)",
-            chars: task.text.length,
-            queued: this.getQueuedCount(),
-            threshold: settings.store.APIEcoModeThreshold,
-            maxWait: settings.store.APIMaxBatchWait,
-        });
-
-        this.schedule();
-    }
-
-    private schedule() {
-        if (this.state === "PROCESSING") return;
-        if (this.timer) clearTimeout(this.timer);
-
-        if (this.registry.size === 0) {
-            this.state = "IDLE";
-            deeplWorkers.delete(this.key);
-            return;
-        }
-
-        this.state = "ACCUMULATING";
-        this.timer = setTimeout(() => this.process(), BATCH_ACCUMULATION_TIME_DEEPL);
-    }
-
-    public reSchedule() {
-        if (this.state !== "PROCESSING" && this.getQueuedCount() > 0) {
-            this.schedule();
-        }
-    }
-
-    private clearPendingTasks() {
-        this.registry.forEach(t => t.resolve(""));
-        this.registry.clear();
-    }
-
-    private async process() {
-        if (this.registry.size === 0 || this.state === "PROCESSING") return;
-        const { generation } = this;
-
-        const currentTasks: TranslationTask[] = [];
-        for (const t of this.registry.values()) {
-            if (t.status === "QUEUED" || !t.status) {
-                t.status = "PROCESSING";
-                currentTasks.push(t);
-            }
-        }
-
-        if (currentTasks.length === 0) return;
-
-        this.state = "PROCESSING";
-
-        const [, sourceLang, targetLang, apiKey] = this.key.split("|||");
-        const reversedTasks = currentTasks.slice().reverse();
-
-        for (let i = 0; i < reversedTasks.length; i += DEEPL_BATCH_SIZE) {
+    private async processBatch(batch: TranslationTask[], generation: number) {
+        const isLive = (task: TranslationTask) => this.registry.get(task.id) === task;
+        if (generation !== this.generation || !batch.some(isLive)) return;
+        const { targetLang, apiKey, engine, dmPrompt, model, endpoint, context } = batch[0];
+        const prompt = context ? `${dmPrompt}\n\n# Recent channel messages\n${context}` : dmPrompt;
+        const controller = new AbortController();
+        this.activeBatches.set(controller, new Set(batch.filter(isLive).map(task => task.id)));
+        const limiter = aiRequestLimiters[engine.startsWith("deepseek") ? "deepseek" : "gemini"];
+        let release: (() => void) | null = null;
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        let onAbort: (() => void) | undefined;
+        try {
+            release = await limiter.acquire(controller.signal);
+            if (!release || generation !== this.generation || !batch.some(isLive)) return;
+            const aborted = new Promise<never>((_, reject) => {
+                onAbort = () => reject(new Error("Translation timed out or cancelled"));
+                controller.signal.addEventListener("abort", onAbort, { once: true });
+            });
+            timeoutId = setTimeout(() => controller.abort(), TRANSLATION_TIMEOUT_MS);
+            const messages = batch.filter(isLive).map(task => ({ id: task.id, text: task.text }));
+            const request = engine.startsWith("deepseek")
+                ? translateBatchWithDeepSeek(this.channelId, messages, targetLang, apiKey, prompt, model!, controller.signal, endpoint)
+                : translateBatchWithGemini(this.channelId, messages, targetLang, apiKey, prompt, model!, controller.signal);
+            const results = await Promise.race([request, aborted]);
             if (generation !== this.generation) return;
-            const chunk = reversedTasks.slice(i, i + DEEPL_BATCH_SIZE).filter(t => this.registry.get(t.id) === t);
-            if (!chunk.length) continue;
-
-            this.abortController = new AbortController();
-            const timeoutId = setTimeout(() => this.abortController?.abort(), TRANSLATION_TIMEOUT_MS);
-
+            const resultMap = new Map(results.map(result => [result.id, result.text]));
+            for (const task of batch.filter(isLive)) {
+                task.resolve(resultMap.get(task.id) || "");
+                this.registry.delete(task.id);
+            }
+        } catch (error) {
+            if (generation !== this.generation || !batch.some(isLive)) return;
+            const reason = error instanceof Error ? error.message : String(error);
+            Logger.error("Translate", "AI batch translation error", error);
+            for (const task of batch.filter(isLive)) {
+                task.reject!(new Error(reason));
+                this.registry.delete(task.id);
+            }
+            const details = error as { status?: number; code?: string; quotaKind?: "rpm" | "tpm" | "rpd" } | null;
             try {
-                const texts = chunk.map(t => t.text);
-                const fetchPromise = translateWithDeepL(texts, sourceLang, targetLang, apiKey, this.abortController.signal);
-
-                const timeoutPromise = new Promise<any>((_, reject) => {
-                    this.abortController?.signal.addEventListener("abort", () => reject(new Error("Timeout: DeepL API logical abort.")));
-                });
-
-                const results = await Promise.race([fetchPromise, timeoutPromise]);
-                if (generation !== this.generation) return;
-                clearTimeout(timeoutId);
-
-                chunk.forEach((t, idx) => {
-                    t.resolve(results[idx] || "");
-                    if (this.registry.get(t.id) === t) {
-                        this.registry.delete(t.id);
-                    }
-                });
-            } catch (e: unknown) {
-                clearTimeout(timeoutId);
-                if (generation !== this.generation) return;
-                Logger.error("Translate", "DeepL Batch translation error", e);
-
-                const errorMsg = e instanceof Error ? e.message : String(e);
-                let status: number | null = null;
-                let errorCode: string | null = null;
-                if (typeof e === "object" && e !== null) {
-                    if ("status" in e) status = (e as any).status;
-                    if ("code" in e) errorCode = (e as any).code;
-                }
-
-                const handledByBreaker = APIBreaker.reportError("deepl", apiKey, status, errorCode, errorMsg);
-
-                if (!handledByBreaker) {
-                    showEngineToast("deepl", errorMsg.length > 80 ? errorMsg.substring(0, 80) + "..." : errorMsg || "Request failed");
+                if (details?.quotaKind) {
+                    const until = setGeminiQuotaLock(apiKey, details.quotaKind);
+                    showGeminiQuotaToast(details.quotaKind, until);
                 } else {
-                    this.reset();
-                    return;
+                    const engineType = engine.startsWith("deepseek") ? "deepseek" : "gemini";
+                    const handled = APIBreaker.reportError(engineType, apiKey, details?.status ?? null, details?.code ?? null, reason);
+                    if (!handled) showEngineToast(engineType, reason);
                 }
-
-                chunk.forEach(t => {
-                    t.resolve("");
-                    if (this.registry.get(t.id) === t) {
-                        this.registry.delete(t.id);
-                    }
-                });
-            } finally {
-                clearTimeout(timeoutId);
-                this.abortController = null;
+            } catch (notificationError) {
+                Logger.warn("Translate", "Failed to report translation error", notificationError);
             }
-        }
-
-        const remainingQueued = this.getQueuedCount();
-        if (remainingQueued > 0) {
-            this.state = "ACCUMULATING";
-            this.schedule();
-        } else {
-            this.state = "IDLE";
-            if (this.registry.size === 0) {
-                deeplWorkers.delete(this.key);
-            }
+        } finally {
+            if (timeoutId) clearTimeout(timeoutId);
+            if (onAbort) controller.signal.removeEventListener("abort", onAbort);
+            this.activeBatches.delete(controller);
+            release?.();
         }
     }
 
@@ -650,29 +339,36 @@ export class DeeplChannelWorker {
         }
     }
 
-    public reset() {
+    public reSchedule() {
+        if (this.state !== "PROCESSING" && this.getQueuedCount() > 0) {
+            this.schedule();
+        }
+    }
+
+    private clearPendingTasks(error?: Error) {
+        const tasks = Array.from(this.registry.values());
+        this.registry.clear();
+        tasks.forEach(t => error && t.reject ? t.reject(error) : t.resolve(""));
+    }
+
+    public reset(error?: Error) {
         this.generation++;
         if (this.timer) clearTimeout(this.timer);
-        if (this.abortController) {
-            this.abortController.abort();
-            this.abortController = null;
-        }
-        this.clearPendingTasks();
+        for (const controller of this.activeBatches.keys()) controller.abort();
+        this.activeBatches.clear();
+        this.clearPendingTasks(error);
         this.state = "IDLE";
-        if (deeplWorkers.get(this.key) === this) deeplWorkers.delete(this.key);
+        if (aiWorkers.get(this.channelId) === this) aiWorkers.delete(this.channelId);
     }
 }
 
-export const deeplWorkers = new Map<string, DeeplChannelWorker>();
+export const aiWorkers = new Map<string, AiChannelWorker>();
 
 export function resetAllWorkers() {
-    geminiWorkers.forEach(w => w.reset());
-    geminiWorkers.clear();
-    deeplWorkers.forEach(w => w.reset());
-    deeplWorkers.clear();
+    aiWorkers.forEach(w => w.reset());
+    aiWorkers.clear();
 }
 
 export function reScheduleAllWorkers() {
-    geminiWorkers.forEach(w => w.reSchedule());
-    deeplWorkers.forEach(w => w.reSchedule());
+    aiWorkers.forEach(w => w.reSchedule());
 }

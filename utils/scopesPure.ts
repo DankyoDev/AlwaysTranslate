@@ -18,7 +18,6 @@ export interface ResolvedConfigBase {
     outgoing: boolean;
     aiPrompt: string;
     outgoingPrompt: string;
-    glossary: Record<string, string>;
 }
 
 /**
@@ -31,7 +30,6 @@ export function applyScopeLayers(
 ): ResolvedConfigBase & { scope: ScopeKind; } {
     const resolved: ResolvedConfigBase & { scope: ScopeKind; } = {
         ...base,
-        glossary: { ...base.glossary },
         scope: "global",
     };
 
@@ -46,7 +44,6 @@ export function applyScopeLayers(
         if (layer.outgoing !== undefined) resolved.outgoing = layer.outgoing;
         if (layer.aiPrompt !== undefined) resolved.aiPrompt = layer.aiPrompt;
         if (layer.outgoingPrompt !== undefined) resolved.outgoingPrompt = layer.outgoingPrompt;
-        if (layer.glossary !== undefined) resolved.glossary = { ...resolved.glossary, ...layer.glossary };
 
         resolved.scope = scope;
     }
@@ -54,14 +51,6 @@ export function applyScopeLayers(
     if (resolved.engine === "disable") resolved.enabled = false;
 
     return resolved;
-}
-
-/** Stable signature of a glossary, used for cache keys. */
-export function glossarySignature(glossary: Record<string, string>): string {
-    return Object.entries(glossary)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, value]) => `${key}=${value}`)
-        .join("|");
 }
 
 /** Maps a channel override to the generic scope shape. */
@@ -76,6 +65,6 @@ export function channelToScope(entry: ChannelConfig, translationMode: string): S
         outgoing: entry.outgoing,
         aiPrompt: entry.aiCustomPrompt,
         outgoingPrompt: entry.outgoingCustomPrompt,
-        glossary: entry.glossary,
     };
 }
+

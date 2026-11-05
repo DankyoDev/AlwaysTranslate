@@ -20,16 +20,13 @@ import { ChannelManager } from "./components/ChannelManager";
 import { ClearCacheButton } from "./components/ClearCacheButton";
 import { ColorPickerInput } from "./components/ColorPickerInput";
 import { DebugLogSection } from "./components/DebugLog";
-import { DictionaryManager } from "./components/DictionaryManager";
 import { GithubLinkInjector } from "./components/GithubLinkInjector";
-import { ManualBatchChatBarIcon, TranslateHeaderButton, TranslateIcon } from "./components/HeaderBarIcon";
+import { TranslateHeaderButton } from "./components/HeaderBarIcon";
 import { Forms } from "./components/LegacyWebpack";
 import { openScopeEditor } from "./components/ScopeEditor";
-import { SettingsOverview } from "./components/SettingsOverview";
 import { SettingsPresets } from "./components/SettingsPresets";
 import { TranslationAccessory } from "./components/TranslationAccessory";
-import { CustomDictionaryStore } from "./dict";
-import { settings } from "./settings";
+import { normalizeTranslationEngines, settings } from "./settings";
 import { TranslationCache } from "./utils/cache";
 import { getRecentChannelUsers } from "./utils/channelUsers";
 import { detectChannelLanguage, getDetectedLanguage } from "./utils/detectedLanguage";
@@ -127,10 +124,7 @@ const SettingsHeader = ({ title }: { title: string }) => (
 
 // Wire up dynamic COMPONENT settings (avoids circular imports)
 settings.def.ui_githubLink.component = GithubLinkInjector;
-settings.def.ui_overview.component = SettingsOverview;
 settings.def.header_translation.component = () => <SettingsHeader title="Traducción" />;
-settings.def.header_dictionary.component = () => <SettingsHeader title="Diccionario" />;
-settings.def.dictionaryManager.component = DictionaryManager;
 settings.def.header_management.component = () => <SettingsHeader title="Canales y mensajes salientes" />;
 settings.def.header_design.component = () => <SettingsHeader title="Apariencia" />;
 settings.def.channelManager.component = ChannelManager;
@@ -139,8 +133,8 @@ settings.def.ui_apiKeys.component = ApiKeysManager;
 
 settings.def.ui_translationColor.component = ColorPickerInput;
 settings.def.ui_clearCache.component = ClearCacheButton;
-settings.def.ui_presets.component = SettingsPresets;
-settings.def.ui_debugLog.component = DebugLogSection;
+settings.def.ui_presets.component = () => <SettingsPresets />;
+settings.def.ui_debugLog.component = () => <DebugLogSection />;
 
 /**
  * The chat-input ("textarea-context") menu is known to go through Vencord's
@@ -226,11 +220,11 @@ export default definePlugin({
         ));
 
         resetTranslationQueues();
-        await Promise.all([CustomDictionaryStore.getInstance().init(), TranslationCache.getInstance().init(), initSecrets()]);
+        normalizeTranslationEngines();
+        await Promise.all([TranslationCache.getInstance().init(), initSecrets()]);
         if (generation !== lifecycleGeneration) return;
 
         Logger.info("Lifecycle", "Plugin started", {
-            dictionary: Object.keys(CustomDictionaryStore.getInstance().getDict()).length,
             cache: TranslationCache.getInstance().getTotalCount(),
         });
 
@@ -240,18 +234,12 @@ export default definePlugin({
         addMessageAccessory("AlwaysTranslate", props => <TranslationAccessory message={props.message} />, 0);
     },
 
-    chatBarButton: {
-        render: ManualBatchChatBarIcon,
-        icon: TranslateIcon
-    },
-
     stop() {
         lifecycleGeneration++;
         pluginStarted = false;
         removeGlobalContextMenuPatch(scopedMenuPatch);
         removeContextMenuPatch("textarea-context", textareaMenuPatch);
         TranslationCache.getInstance().flush();
-        CustomDictionaryStore.getInstance().flush();
         resetTranslationQueues();
         removeMessageAccessory("AlwaysTranslate");
 
@@ -353,7 +341,6 @@ export default definePlugin({
             targetLang,
             chars: message.content.length,
             prompt: customPrompt || "(none)",
-            glossaryTerms: Object.keys(resolved.glossary).length,
         });
 
 
@@ -373,9 +360,7 @@ export default definePlugin({
                 apiKeys,
                 channelId,
                 undefined,
-                false,
                 customPrompt,
-                resolved.glossary,
                 true
             );
 

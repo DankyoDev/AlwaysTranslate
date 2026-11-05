@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { settings } from "../settings";
+import { TRANSLATION_PROMPT_REVISION } from "../api/geminiPrompt";
+import { getChannelConfig, settings } from "../settings";
 
 export function getCacheKey(
     channelId: string,
@@ -13,18 +14,18 @@ export function getCacheKey(
     sourceLang: string,
     targetLang: string,
     sourceText: string,
-    prompt = "",
-    glossarySignature = ""
+    customPrompt?: string
 ): string {
+    const config = channelId ? getChannelConfig(channelId).config : null;
     const model = engine.startsWith("gemini") ? settings.store.geminiModel
         : engine.startsWith("deepseek") ? settings.store.deepseekModel : "";
     const endpoint = engine.startsWith("deepseek") ? settings.store.deepseekBaseUrl : "";
     // Versioned, channel-scoped keys: no cross-engine or cross-prompt reuse.
     // Exact source text avoids hash collisions returning another message's translation.
     return getChannelCachePrefix(channelId) + JSON.stringify([
-        engine, model, endpoint, sourceLang, targetLang, prompt, glossarySignature,
-        settings.store.dictionaryCaseSensitive, settings.store.hideEmojis,
-        settings.store.hideMentions, sourceText
+        engine, model, endpoint, sourceLang, targetLang, customPrompt ?? config?.aiCustomPrompt ?? "",
+        settings.store.hideEmojis,
+        settings.store.hideMentions, sourceText, TRANSLATION_PROMPT_REVISION
     ]);
 }
 

@@ -4,15 +4,15 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { settings } from "../settings";
+import { getChannelConfig, settings } from "../settings";
+import { splitTranslationText } from "../utils/batching";
 import { noteDetectedLanguage } from "../utils/detectedLanguage";
-import { Logger, preview } from "../utils/logger";
+import { Logger } from "../utils/logger";
 import { shouldTranslate } from "../utils/message";
-import { getDictRegex, sanitizeTranslation } from "../utils/string";
-import { getGeminiActiveQuotaLock, showApiToast, showGeminiQuotaToast } from "./breaker";
+import { describeGeminiQuotaLock, getGeminiActiveQuotaLock, showGeminiQuotaToast } from "./breaker";
 import { buildContextText } from "./context";
 import { googleTranslate, isSameLanguage } from "./google";
-import { DeeplChannelWorker, deeplWorkers, GeminiChannelWorker, geminiWorkers, reScheduleAllWorkers,resetAllWorkers } from "./worker";
+import { AiChannelWorker, aiWorkers, reScheduleAllWorkers,resetAllWorkers } from "./worker";
 
 export { reScheduleAllWorkers };
 
@@ -27,15 +27,48 @@ export async function translate(
     channelId: string,
     messageId: string,
     text: string,
-    sourceLang: string,
+    _sourceLang: string,
     targetLang: string,
     engine: string,
-    apiKeys: { deepl: string, gemini: string, deepseek: string },
-    isManual = false,
-    dictMatches: Record<string, string> = {},
+    apiKeys: { gemini: string, deepseek: string },
     customPrompt?: string,
     context?: string
 ): Promise<string> {
+    const parts = splitTranslationText(text);
+    const groupId = parts.length > 1 ? crypto.randomUUID() : undefined;
+    const requests = parts.map(part => part.text.trim() ? translateChunk(channelId, messageId, part.text, _sourceLang,
+        targetLang, engine, apiKeys, customPrompt, groupId, context) : Promise.resolve(part.text));
+    if (!messageId) aiWorkers.get(channelId)?.flushNow();
+    const results = await Promise.all(requests);
+    if (results.some((result, index) => !result && parts[index].text.trim())) return "";
+    return results.map((result, index) => result + parts[index].separator).join("");
+}
+
+async function translateChunk(
+    channelId: string,
+    messageId: string,
+    text: string,
+    _sourceLang: string,
+    targetLang: string,
+    engine: string,
+    apiKeys: { gemini: string, deepseek: string },
+    customPrompt?: string,
+    groupId?: string,
+    context?: string
+): Promise<string> {
+    // Google Translate: free endpoint, one request per chunk, no key or queue.
+    if (engine === "google") {
+        try {
+            const result = await googleTranslate(text, _sourceLang, targetLang);
+            if (result.sourceLanguage && isSameLanguage(result.sourceLanguage, targetLang)) return "";
+            if (channelId && result.sourceLanguage) noteDetectedLanguage(channelId, result.sourceLanguage);
+            return result.text;
+        } catch (error) {
+            Logger.warn("Google", "translation failed", error);
+            return "";
+        }
+    }
+
     if (engine?.startsWith("gemini") || engine?.startsWith("deepseek")) {
         const isDeepSeek = engine.startsWith("deepseek");
         const engineKey = isDeepSeek ? apiKeys.deepseek : apiKeys.gemini;
@@ -43,35 +76,26 @@ export async function translate(
         if (!isDeepSeek) {
             const activeLock = getGeminiActiveQuotaLock(engineKey);
             if (activeLock) {
-                showGeminiQuotaToast(activeLock.kind, activeLock.until, isManual);
-                return "";
+                showGeminiQuotaToast(activeLock.kind, activeLock.until);
+                throw new Error(describeGeminiQuotaLock(activeLock.kind, activeLock.until));
             }
         }
 
-        const result = await new Promise<string>(resolve => {
-            const dmPrompt = customPrompt ?? "";
+        const result = await new Promise<string>((resolve, reject) => {
+            const { config } = getChannelConfig(channelId);
+            const dmPrompt = customPrompt ?? config?.aiCustomPrompt ?? "";
 
-            if (!geminiWorkers.has(channelId)) {
-                geminiWorkers.set(channelId, new GeminiChannelWorker(channelId));
+            if (!aiWorkers.has(channelId)) {
+                aiWorkers.set(channelId, new AiChannelWorker(channelId));
             }
 
-            const worker = geminiWorkers.get(channelId)!;
+            const worker = aiWorkers.get(channelId)!;
             const taskId = crypto.randomUUID();
             worker.enqueue({
-                id: taskId, messageId, channelId, text, resolve, targetLang, apiKey: engineKey, engine, dmPrompt, isManual, dictMatches, context,
+                id: taskId, groupId, messageId, channelId, text, resolve, reject, targetLang, apiKey: engineKey, engine, dmPrompt, context,
                 model: isDeepSeek ? settings.store.deepseekModel : settings.store.geminiModel,
                 endpoint: isDeepSeek ? settings.store.deepseekBaseUrl : undefined
             });
-            Logger.debug("Translate", "queued AI task", {
-                taskId, channelId, engine, targetLang,
-                chars: text.length,
-                contextLines: context ? context.split("\n").length : 0,
-                prompt: dmPrompt ? preview(dmPrompt, 80) : "(none)",
-                queued: worker.getQueuedCount?.() ?? "?",
-            });
-            if (!messageId) {
-                worker.flushNow();
-            }
         });
 
         if (result !== "") {
@@ -80,89 +104,11 @@ export async function translate(
 
         if (!isDeepSeek) {
             const retryLock = getGeminiActiveQuotaLock(engineKey);
-            if (retryLock) showGeminiQuotaToast(retryLock.kind, retryLock.until, isManual);
+            if (retryLock) showGeminiQuotaToast(retryLock.kind, retryLock.until);
         }
 
         return "";
     }
-
-    // Google Translate: free endpoint, no key, one request per message
-    if (engine === "google") {
-        const attempt = async () => {
-            Logger.debug("Google", "request", { sourceLang, targetLang, chars: text.length });
-
-            const result = await googleTranslate(text, sourceLang, targetLang);
-
-            Logger.debug("Google", "response", {
-                sourceLanguage: result.sourceLanguage || "(unknown)",
-                chars: result.text.length,
-                preview: preview(result.text),
-            });
-
-            return result;
-        };
-
-        try {
-            let result;
-
-            try {
-                result = await attempt();
-            } catch (e) {
-                const message = e instanceof Error ? e.message : String(e);
-                if (message.toLowerCase().includes("rate limit")) throw e;
-
-                Logger.warn("Google", "request failed, retrying once", e);
-                await new Promise(resolve => setTimeout(resolve, 500));
-                result = await attempt();
-            }
-
-            // Already in the language I read: nothing to show
-            if (result.sourceLanguage && isSameLanguage(result.sourceLanguage, targetLang)) {
-                Logger.debug("Google", "skipped: already in target language", { sourceLanguage: result.sourceLanguage, targetLang });
-                return "";
-            }
-
-            if (channelId) noteDetectedLanguage(channelId, result.sourceLanguage);
-
-            return result.text;
-        } catch (e) {
-            const message = e instanceof Error ? e.message : String(e);
-            if (message.toLowerCase().includes("rate limit")) {
-                Logger.warn("Google", "rate limit reached, cooling down", message);
-                showApiToast("google", "límite de peticiones alcanzado, reintentando en un minuto", 60_000);
-            } else {
-                Logger.warn("Google", "request failed", e);
-            }
-            return "";
-        }
-    }
-
-    // DeepL uses Batching
-    if (engine === "deepl") {
-        Logger.debug("DeepL", "queueing task", { channelId, chars: text.length, targetLang });
-        const result = await new Promise<string>(resolve => {
-            const key = `deepl|||${sourceLang}|||${targetLang}|||${apiKeys.deepl}`;
-            if (!deeplWorkers.has(key)) {
-                deeplWorkers.set(key, new DeeplChannelWorker(key));
-            }
-
-            const worker = deeplWorkers.get(key)!;
-            worker.enqueue({
-                id: crypto.randomUUID(), messageId, channelId, text, resolve, targetLang, apiKey: apiKeys.deepl, engine: "deepl", dmPrompt: ""
-            });
-            if (!messageId) {
-                worker.flushNow();
-            }
-        });
-
-        if (result !== "") {
-            return result;
-        }
-
-        return "";
-    }
-
-
 
     // Default fallback (should not be reached unless engine is unknown)
     return Promise.resolve("");
@@ -171,10 +117,10 @@ export async function translate(
 
 
 // --- Tokenizer Helpers ---
-const PRESERVE_BASE = /<@[!&]?\d+>|<#\d+>|<[^>]+>|https?:\/\/[^\s]+|```[\s\S]*?```|`[^`]+`/gmu;
+const PRESERVE_BASE = /\[\s*token\d+\s*\]|<@[!&]?\d+>|<#\d+>|<[^>]+>|https?:\/\/[^\s]+|```[\s\S]*?```|`[^`]+`/gimu;
 
-export function getGeminiBatchState(channelId: string, messageId: string) {
-    const worker = geminiWorkers.get(channelId);
+export function getAiBatchState(channelId: string, messageId: string) {
+    const worker = aiWorkers.get(channelId);
     if (!worker) return null;
 
     const task = Array.from(worker.registry.values()).find(t => t.messageId === messageId);
@@ -209,68 +155,28 @@ export function getGeminiBatchState(channelId: string, messageId: string) {
 
 function tokenizeText(text: string, hideEmojis: boolean, hideMentions: boolean): { textToTranslate: string, tokens: string[] } {
     const tokens: string[] = [];
-    let textToTranslate = text;
-
-    if (hideEmojis) {
-        // Remove emojis completely
-        textToTranslate = textToTranslate
-            .replace(/<a?:\w+:\d+>/g, "")
-            .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "");
-    }
-
-    if (hideMentions) {
-        // Remove mentions completely
-        textToTranslate = textToTranslate.replace(/<@[!&]?\d+>/g, "");
-    }
-
-    // Tokenize remaining special elements (URLs, code blocks, etc.)
-    textToTranslate = textToTranslate.replace(PRESERVE_BASE, match => {
+    let textToTranslate = text.replace(PRESERVE_BASE, match => {
+        if (hideMentions && /^<@[!&]?\d+>$/.test(match)) return "";
+        if (hideEmojis && /^<a?:\w+:\d+>$/.test(match)) return "";
         const id = tokens.length;
         tokens.push(match);
         return `[token${id}]`;
     });
+    if (hideEmojis) textToTranslate = textToTranslate.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "");
 
     return { textToTranslate, tokens };
 }
 
 function restoreTokens(text: string, tokens: string[]): string {
-    return text.replace(/\[\s*token(\d+)\s*\]/gi, (match, idStr) => {
+    const seen = new Set<number>();
+    const restored = text.replace(/\[\s*token(\d+)\s*\]/gi, (match, idStr) => {
         const id = parseInt(idStr, 10);
-        return tokens[id] !== undefined ? tokens[id] : match;
+        if (tokens[id] === undefined || seen.has(id)) throw new Error("Invalid translation: damaged protected content");
+        seen.add(id);
+        return tokens[id];
     });
-}
-
-// --- Dictionary Cache ---
-let cachedDictHash = "";
-let cachedDictRegex: RegExp | null = null;
-
-function applyCustomDictionary(text: string, caseSensitive: boolean, dict: Record<string, string>): { replacedText: string, matches: Record<string, string> } {
-    const dictKeys = Object.keys(dict);
-    const matches: Record<string, string> = {};
-
-    if (dictKeys.length === 0) return { replacedText: text, matches };
-
-    // Cache invalidation logic
-    const currentHash = JSON.stringify([dictKeys, caseSensitive]);
-    if (currentHash !== cachedDictHash) {
-        dictKeys.sort((a, b) => b.length - a.length);
-        cachedDictRegex = getDictRegex(dictKeys, caseSensitive);
-        cachedDictHash = currentHash;
-    }
-
-    if (cachedDictRegex) {
-        const replacedText = text.replace(cachedDictRegex, match => {
-            const matchedKey = dictKeys.find(k => caseSensitive ? k === match : k.toLowerCase() === match.toLowerCase());
-            if (matchedKey && dict[matchedKey]) {
-                matches[matchedKey] = dict[matchedKey];
-                return dict[matchedKey];
-            }
-            return match;
-        });
-        return { replacedText, matches };
-    }
-
-    return { replacedText: text, matches };
+    if (seen.size !== tokens.length) throw new Error("Invalid translation: missing protected content");
+    return restored;
 }
 
 export async function safeTranslate(
@@ -278,45 +184,17 @@ export async function safeTranslate(
     sourceLang: string,
     targetLang: string,
     engine: string,
-    apiKeys: { deepl: string, gemini: string, deepseek: string },
+    apiKeys: { gemini: string, deepseek: string },
     channelId?: string,
     messageId?: string,
-    isManual = false,
     customPrompt?: string,
-    glossary: Record<string, string> = {},
-    isOutgoing = false
+    outgoing = false
 ): Promise<string | null> {
-    if (!isOutgoing && !shouldTranslate(content, targetLang)) {
-        Logger.debug("Translate", "skipped by language heuristic", { targetLang, chars: content.length, preview: preview(content) });
-        return null;
-    }
+    if (!shouldTranslate(content, targetLang)) return null;
 
     // 1. Tokenize (Extract mentions, code blocks, emojis)
-    let { textToTranslate, tokens } = tokenizeText(content.trim(), settings.store.hideEmojis, settings.store.hideMentions);
+    const { textToTranslate, tokens } = tokenizeText(content.trim(), !outgoing && settings.store.hideEmojis, !outgoing && settings.store.hideMentions);
 
-    // 2. Custom Dictionary Substitution
-    const isAI = engine?.startsWith("gemini") || engine?.startsWith("deepseek");
-    const { replacedText, matches } = applyCustomDictionary(textToTranslate, settings.store.dictionaryCaseSensitive, glossary);
-
-    Logger.debug("Translate", "prepared", {
-        messageId: messageId || "(outgoing)",
-        channelId: channelId || "(none)",
-        engine,
-        sourceLang,
-        targetLang,
-        chars: content.length,
-        tokens: tokens.length,
-        dictionaryMatches: Object.keys(matches).length,
-        manual: isManual,
-        prompt: customPrompt ? preview(customPrompt) : "(none)",
-        glossaryTerms: Object.keys(glossary).length,
-    });
-
-    // For AI, we keep original text and pass dictionary rules to prompt.
-    // For DeepL, we inline replace the text.
-    textToTranslate = isAI ? textToTranslate : replacedText;
-
-    // 3. Translate
     const result = await translate(
         channelId || "",
         messageId || "",
@@ -325,33 +203,13 @@ export async function safeTranslate(
         targetLang,
         engine,
         apiKeys,
-        isManual,
-        matches,
         customPrompt,
-        isAI ? buildContextText(channelId || "", messageId || undefined) : undefined
+        outgoing ? undefined : buildContextText(channelId || "", messageId || undefined)
     );
 
-    if (!result) {
-        Logger.debug("Translate", "no result (skipped, same language or failed)", { messageId, engine });
-        return null;
-    }
+    if (!result) return null;
+    if (result === textToTranslate) return outgoing ? content : null;
 
-    if (result === textToTranslate) {
-        Logger.debug("Translate", "unchanged output, nothing to show", { messageId, engine });
-        return null;
-    }
-
-    // 4. Remove LLM artifacts, then restore tokens
-    const sanitized = sanitizeTranslation(result, content);
-    if (sanitized !== result) {
-        Logger.debug("Translate", "sanitized LLM punctuation", {
-            before: preview(result),
-            after: preview(sanitized),
-        });
-    }
-
-    const finalText = restoreTokens(sanitized, tokens);
-    Logger.debug("Translate", "done", { messageId, chars: finalText.length, preview: preview(finalText) });
-
-    return finalText;
+    // Restore tokens
+    return restoreTokens(result, tokens);
 }

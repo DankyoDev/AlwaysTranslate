@@ -7,8 +7,5 @@
 import { showToast } from "@webpack/common";
 
 export function showTranslationToast(text: string, variant: "critical" | "success" = "critical") {
-    showToast({
-        text,
-        variant: variant === "success" ? "success" : "critical",
-    });
+    showToast({ text, variant });
 }

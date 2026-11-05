@@ -57,28 +57,6 @@ function triFromValue(value: string) {
     return value === "on";
 }
 
-function glossaryToText(glossary?: Record<string, string>): string {
-    return Object.entries(glossary ?? {}).map(([key, value]) => `${key} = ${value}`).join("\n");
-}
-
-function textToGlossary(text: string): Record<string, string> | undefined {
-    const glossary: Record<string, string> = {};
-
-    for (const line of text.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-
-        const separator = trimmed.indexOf("=");
-        if (separator === -1) continue;
-
-        const key = trimmed.slice(0, separator).trim();
-        const value = trimmed.slice(separator + 1).trim();
-        if (key && value) glossary[key] = value;
-    }
-
-    return Object.keys(glossary).length ? glossary : undefined;
-}
-
 function SelectField({ label, options, value, onChange, hint }: {
     label: string;
     options: Array<{ label: string; value: string; }>;
@@ -104,7 +82,6 @@ function ScopeFields({ target, label, showSource = true, showOutgoing = true, sh
     // was actually persisted (never a stale local copy).
     const [, bump] = useState(0);
     const scope = readScope(target);
-    const [glossaryText, setGlossaryText] = useState(() => glossaryToText(scope.glossary));
 
     function update(patch: Partial<ScopeConfig>) {
         writeScope(target, patch);
@@ -114,7 +91,6 @@ function ScopeFields({ target, label, showSource = true, showOutgoing = true, sh
 
     function reset() {
         clearScope(target);
-        setGlossaryText("");
         bump(v => v + 1);
     }
 
@@ -190,18 +166,6 @@ function ScopeFields({ target, label, showSource = true, showOutgoing = true, sh
                     </Field>
                 </>
             )}
-
-            <Field label="Glosario" hint="Uno por línea: término = traducción. Sustituye al diccionario global en este ámbito.">
-                <TextArea
-                    value={glossaryText}
-                    onChange={(v: string) => {
-                        setGlossaryText(v);
-                        update({ glossary: textToGlossary(v) });
-                    }}
-                    placeholder={"GG = buena partida\nnerf = nerfeo"}
-                    rows={3}
-                />
-            </Field>
 
             <div style={{ display: "flex", gap: 8 }}>
                 <Button

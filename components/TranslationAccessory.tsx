@@ -4,12 +4,11 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import ErrorBoundary from "@components/ErrorBoundary";
 import { Message } from "@vencord/discord-types";
 import { findCssClassesLazy } from "@webpack";
-import { Parser, useEffect,UserStore, useState } from "@webpack/common";
+import { Parser, UserStore } from "@webpack/common";
 
-import { useIsMessageVisible } from "../hooks/useIsMessageVisible";
-import { useManualTranslation } from "../hooks/useManualTranslation";
 import { useMessageVisibility } from "../hooks/useMessageVisibility";
 import { useTranslationExecution } from "../hooks/useTranslationExecution";
 import { pluginStarted } from "../index";
@@ -23,13 +22,12 @@ import { LoadingIndicator } from "./LoadingIndicator";
 
 const CodeContainerClasses = findCssClassesLazy("markup");
 
-export function TranslationAccessory({ message }: { message: Message }) {
+export const TranslationAccessory = ErrorBoundary.wrap(function TranslationAccessory({ message }: { message: Message }) {
     const {
         hideOriginal,
         showSeparator,
         translationColor,
         skipOwnMessages,
-        manualTranslationEngine = "google",
         hideEmojis,
         _cacheVersion
     } = settings.use([
@@ -43,19 +41,15 @@ export function TranslationAccessory({ message }: { message: Message }) {
         "guildOverrides",
         "userOverrides",
         "translationMode",
-        "manualTranslationEngine",
         "hideEmojis",
         "geminiModel",
         "deepseekModel",
         "deepseekBaseUrl",
-        "dictionaryCaseSensitive",
-        "customDictionary",
         "hideMentions",
         "_cacheVersion"
     ]);
 
     const apiKeys = useApiKeys();
-    const isVisible = useIsMessageVisible(message.id);
 
     const resolved = resolveConfig({
         channelId: message.channel_id,
@@ -70,86 +64,29 @@ export function TranslationAccessory({ message }: { message: Message }) {
     }
     const allowed = resolved.enabled;
 
-    const activeManualEngine = manualTranslationEngine === "disable"
-        ? "google"
-        : manualTranslationEngine;
-
     // Quick skip checks for own messages and optimistic messages
     const isOwnMessage = skipOwnMessages && message.author?.id === UserStore.getCurrentUser()?.id;
     const isOptimistic = !/^\d{17,20}$/.test(message.id) || message.state === "SENDING";
     const skipMessage = isOwnMessage || isOptimistic || !message.content;
     const shouldTranslateContent = !skipMessage && shouldTranslate(message.content, resolvedTarget);
 
-    const autoEngine = resolved.engine;
+    const activeEngine = resolved.engine;
+    const cache = TranslationCache.getInstance();
+    const displayed = cache.getDisplayed(message.channel_id, message.id, message.content, resolvedTarget);
+    const cacheKey = displayed?.cacheKey ?? getCacheKey(message.channel_id, message.id, activeEngine, sourceLang, resolvedTarget, message.content, resolved.aiPrompt);
 
-    // Cache keys are engine-specific:
-    // - Gemini uses persistent cache
-    // - DeepL uses volatile cache
-    const autoCacheKey = getCacheKey(message.channel_id, message.id, autoEngine, sourceLang, resolvedTarget, message.content, resolved.aiPrompt, resolved.glossarySignature);
-    const manualCacheKey = getCacheKey(message.channel_id, message.id, activeManualEngine, sourceLang, resolvedTarget, message.content, resolved.aiPrompt, resolved.glossarySignature);
-
-    // Manual Translation Hook
-    const { isManual } = useManualTranslation({
-        // Since we hoist `isTranslating`, we need to break the circular dependency.
-        // We can pass false here if we don't have it yet, or use a ref.
-        // Actually, we can just check pending cache directly in the hook
-        isTranslating: false, // We'll rely on pending cache check instead
-        manualCacheKey,
-        shouldTranslateContent,
-        content: message.content
-    });
-
-    const [renderTick, setForceRender] = useState(0);
-
-    let activeEngine = isManual ? activeManualEngine : autoEngine;
-    let cacheKey = isManual ? manualCacheKey : autoCacheKey;
-    let cachedTranslated = TranslationCache.getInstance().peek(cacheKey);
+    let cachedTranslated = displayed?.text ?? cache.peek(cacheKey);
 
     // Outgoing cache fast-path: instantly display own sent translations
-    if (!cachedTranslated && !isManual && message.author?.id === UserStore.getCurrentUser()?.id) {
-        const outgoingHit = TranslationCache.getInstance().getOutgoing(message.channel_id, message.content);
+    if (!cachedTranslated && message.author?.id === UserStore.getCurrentUser()?.id) {
+        const outgoingHit = cache.getOutgoing(message.channel_id, message.content);
         if (outgoingHit) {
             cachedTranslated = outgoingHit;
-            TranslationCache.getInstance().set(cacheKey, outgoingHit, activeEngine);
+            cache.set(cacheKey, outgoingHit, activeEngine);
         }
     }
 
-    // Prioritize Gemini cache over DeepL if the user previously manually translated it
-    if (!isManual && autoEngine !== "disable" && !(autoEngine.startsWith("gemini") || autoEngine.startsWith("deepseek")) && (activeManualEngine.startsWith("gemini") || activeManualEngine.startsWith("deepseek"))) {
-        const manualCached = TranslationCache.getInstance().peek(manualCacheKey);
-        if (manualCached) {
-            activeEngine = activeManualEngine;
-            cacheKey = manualCacheKey;
-            cachedTranslated = manualCached;
-        }
-    }
-
-    // If manual mode is active, watch the auto engine's pending promise so we can upgrade when it finishes
-    useEffect(() => {
-        if (isManual && autoEngine !== activeManualEngine && (autoEngine.startsWith("gemini") || autoEngine.startsWith("deepseek")) && !TranslationCache.getInstance().peek(autoCacheKey)) {
-            const pending = TranslationCache.getInstance().getPending(autoCacheKey, message.content);
-            if (pending) {
-                let isMounted = true;
-                pending.then(() => {
-                    if (isMounted) setForceRender(prev => prev + 1);
-                });
-                return () => { isMounted = false; };
-            }
-        }
-    }, [isManual, autoEngine, activeManualEngine, autoCacheKey, message.content]);
-
-    // Only override manual translation if auto engine is Gemini and has finished,
-    // AND we want to prioritize it (e.g. auto is Gemini but manual was just a fallback).
-    if (isManual && autoEngine !== activeManualEngine && (autoEngine.startsWith("gemini") || autoEngine.startsWith("deepseek"))) {
-        const autoCached = TranslationCache.getInstance().peek(autoCacheKey);
-        if (autoCached) {
-            activeEngine = autoEngine;
-            cacheKey = autoCacheKey;
-            cachedTranslated = autoCached;
-        }
-    }
-    // Execution Hook
-    const { translatedText, isTranslating } = useTranslationExecution({
+    const { translatedText, isTranslating, error, retry } = useTranslationExecution({
         messageId: message.id,
         channelId: message.channel_id,
         content: message.content,
@@ -159,31 +96,33 @@ export function TranslationAccessory({ message }: { message: Message }) {
         resolvedTarget,
         shouldTranslateContent,
         allowed,
-        isManual,
         skipMessage,
-        deeplApiKey: apiKeys.deepl,
         geminiApiKey: apiKeys.gemini,
         deepseekApiKey: apiKeys.deepseek,
-        aiPrompt: resolved.aiPrompt,
-        glossary: resolved.glossary,
+        customPrompt: resolved.aiPrompt,
         cachedTranslated,
-        cacheRevision: _cacheVersion,
-        enabled: isVisible && pluginStarted
+        cacheRevision: _cacheVersion
     });
 
     // Visibility Hook (DOM side-effects)
     useMessageVisibility({
         messageId: message.id,
-        allowed,
+        allowed: allowed && activeEngine !== "disable",
         hideOriginal,
         isTranslating,
         translatedText
     });
 
-    // If channel is disabled or no translation yet, render nothing
     if (!pluginStarted) return null;
     if (activeEngine === "disable") return null;
-    if (!allowed && !isManual) return null;
+    if (!allowed) return null;
+    if (error && !isTranslating) {
+        return (
+            <button className="bat-translation-retry" type="button" title={error} onClick={retry}>
+                Traducción fallida <span aria-hidden="true">↻</span>
+            </button>
+        );
+    }
     if (!translatedText && !isTranslating) return null;
 
     const customColor = translationColor || "#9aff99";
@@ -199,7 +138,6 @@ export function TranslationAccessory({ message }: { message: Message }) {
                 topMargin={topMargin}
                 hideOriginal={hideOriginal}
                 showSeparator={showSeparator}
-                isGemini={activeEngine.startsWith("gemini") || activeEngine.startsWith("deepseek")}
                 messageId={message.id}
                 channelId={message.channel_id}
             />
@@ -226,4 +164,4 @@ export function TranslationAccessory({ message }: { message: Message }) {
             })}
         </div>
     );
-}
+}, { noop: true });

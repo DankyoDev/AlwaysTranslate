@@ -7,10 +7,9 @@
 import { PluginNative } from "@utils/types";
 
 import { settings } from "../settings";
-import { Logger, preview } from "../utils/logger";
-import { httpError } from "./errors";
+import { validateBatchTranslations } from "./batchResponse";
+import { requestDeepSeek } from "./deepseekRequest";
 import { buildDeepSeekSystemPrompt, buildDeepSeekUserPrompt } from "./geminiPrompt";
-import { nativeRequest } from "./nativeRequest";
 
 const Native = VencordNative.pluginHelpers.AlwaysTranslate as PluginNative<typeof import("../native")>;
 
@@ -22,14 +21,13 @@ export async function translateBatchWithDeepSeek(
     dmPrompt: string,
     modelName: string,
     signal?: AbortSignal,
-    baseUrl?: string,
-    context?: string
+    baseUrl?: string
 ): Promise<{ id: string; text: string }[]> {
     if (!messages.length) return [];
     if (!apiKey) throw new Error("API key missing");
 
     const systemPrompt = buildDeepSeekSystemPrompt();
-    const userPrompt = buildDeepSeekUserPrompt(targetLang, dmPrompt, messages, context);
+    const userPrompt = buildDeepSeekUserPrompt(targetLang, dmPrompt, messages);
 
     const endpoint = baseUrl || settings.store.deepseekBaseUrl || "https://api.deepseek.com/chat/completions";
     const actualModelName = modelName || settings.store.deepseekModel || "deepseek-v4-flash";
@@ -53,28 +51,12 @@ export async function translateBatchWithDeepSeek(
         max_tokens: 8192
     };
 
-    Logger.debug("DeepSeek", "request", {
-        model: actualModelName,
-        endpoint,
-        systemPromptChars: systemPrompt.length,
-        userPromptChars: userPrompt.length,
-        systemPrompt: preview(systemPrompt, 2500),
-        userPrompt: preview(userPrompt, 2500),
-    });
-
     if (!isR1) {
         payload.response_format = { type: "json_object" };
         payload.thinking = { type: "disabled" }; // Explicitly disable thinking for DeepSeek V4 API
     }
 
-    let res;
-    try {
-        res = await nativeRequest(id => Native.batDeepSeekFetch(endpoint, apiKey, JSON.stringify(payload), id), signal);
-    } catch (e) {
-        throw e;
-    }
-
-    if (!res.ok) throw httpError(res.status, String(res.data));
+    const res = await requestDeepSeek(payload, apiKey, actualModelName, endpoint, signal);
 
     const resultText = (() => {
         try {
@@ -88,8 +70,6 @@ export async function translateBatchWithDeepSeek(
         throw new Error("Empty response from DeepSeek API");
     }
 
-    Logger.debug("DeepSeek", "raw response", { chars: resultText.length, text: preview(resultText, 2000) });
-
     try {
         let cleanJson = resultText.trim();
         cleanJson = cleanJson.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
@@ -102,20 +82,7 @@ export async function translateBatchWithDeepSeek(
 
         const parsed = JSON.parse(cleanJson);
 
-        // Handle array format: [{"id": "...", "text": "..."}]
-        if (Array.isArray(parsed)) {
-            const resultMap = new Map(parsed.map((r: any) => [r.id, r.text]));
-            return messages.map(m => ({
-                id: m.id,
-                text: resultMap.get(m.id) ?? ""
-            }));
-        }
-
-        // Handle object format: {"id": "translated text"}
-        return messages.map(m => ({
-            id: m.id,
-            text: parsed[m.id] ?? ""
-        }));
+        return validateBatchTranslations(parsed, messages, true);
     } catch (e: any) {
         console.error("DeepSeek Parse error:", resultText, e);
         throw new Error("Failed to parse DeepSeek JSON response: " + e.message);

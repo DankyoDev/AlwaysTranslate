@@ -6,7 +6,6 @@
 
 import { ChannelStore } from "@webpack/common";
 
-import { CustomDictionaryStore } from "../dict";
 import {
     addChannel,
     type ChannelConfig,
@@ -22,11 +21,11 @@ import {
     updateGuildScope,
     updateUserScope
 } from "../settings";
-import { applyScopeLayers, channelToScope, glossarySignature, type ResolvedConfigBase, type ScopeKind } from "./scopesPure";
+import { applyScopeLayers, channelToScope, type ResolvedConfigBase, type ScopeKind } from "./scopesPure";
 
 export type { ScopeKind };
 
-export type ResolvedConfig = ResolvedConfigBase & { scope: ScopeKind; glossarySignature: string; };
+export type ResolvedConfig = ResolvedConfigBase & { scope: ScopeKind; };
 
 export interface ResolveContext {
     channelId?: string;
@@ -77,7 +76,6 @@ export function readScope(target: ScopeTarget): ScopeConfig {
                 outgoing: entry.outgoing,
                 aiPrompt: entry.aiCustomPrompt,
                 outgoingPrompt: entry.outgoingCustomPrompt,
-                glossary: entry.glossary,
             };
         }
         case "guild":
@@ -110,7 +108,6 @@ export function writeScope(target: ScopeTarget, patch: Partial<ScopeConfig>) {
             if ("outgoing" in patch) channelPatch.outgoing = patch.outgoing;
             if ("aiPrompt" in patch) channelPatch.aiCustomPrompt = patch.aiPrompt;
             if ("outgoingPrompt" in patch) channelPatch.outgoingCustomPrompt = patch.outgoingPrompt;
-            if ("glossary" in patch) channelPatch.glossary = patch.glossary;
 
             updateChannel(target.id, channelPatch);
             break;
@@ -162,7 +159,6 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
         outgoing: store.translateOutgoing,
         aiPrompt: "",
         outgoingPrompt: "",
-        glossary: { ...CustomDictionaryStore.getInstance().getDict() },
     };
 
     const layers: Array<[ScopeKind, ScopeConfig | undefined]> = [];
@@ -182,8 +178,5 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
 
     const resolved = applyScopeLayers(base, layers);
 
-    return {
-        ...resolved,
-        glossarySignature: glossarySignature(resolved.glossary),
-    };
+    return resolved;
 }

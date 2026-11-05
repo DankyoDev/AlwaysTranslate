@@ -4,18 +4,20 @@ Real-time AI translation for Vencord.
 
 ## About this fork
 
-Fork of [komi-juru/AlwaysTranslate](https://github.com/komi-juru/AlwaysTranslate), maintained by [DankyoDev](https://github.com/DankyoDev).
+Fork of [komi-juru/AlwaysTranslate](https://github.com/komi-juru/AlwaysTranslate), maintained by [DankyoDev](https://github.com/DankyoDev) and kept in sync with upstream.
 
 What this fork changes:
 
-- **Google Translate engine**, free and without an API key, next to Gemini, DeepSeek and DeepL.
+- **Google Translate engine**, free and without an API key, next to Gemini and DeepSeek.
 - **Scope hierarchy:** user > channel > server > global, merged layer by layer, with a visual editor for each scope.
 - **Outgoing translation** with preview, a target language per scope and the original message kept visible.
 - **API keys encrypted at rest** with the OS keychain (DPAPI on Windows) through Electron's `safeStorage`. The provider requests run in the main process instead of the renderer.
 - **Debug log:** optional, written to `AlwaysTranslate.log`, with a viewer in the plugin settings. Keys are never logged.
-- **Settings reworked** and translated into Spanish: overview page, dropdowns, scope editor, presets and a per-scope dictionary.
-- **Reliability:** bounded waits, retries with backoff, rate-limit cooldowns, clearer API errors and a scope-aware cache.
-- **Tests** for scope resolution, output sanitization and language detection.
+- **Settings translated into Spanish**, with a scope editor, presets and per-scope prompts.
+- **Built on the upstream pipeline:** request limiter with backoff, 6000-character batching, 60-second timeout, cache policy, retries and the regression test suite.
+- **Scope tests** for resolution and language comparison.
+
+Like upstream, this fork no longer ships the manual "Translate now" button, the DeepL engine or the custom dictionary.
 
 <img width="583" height="698" alt="image" src="https://github.com/user-attachments/assets/d3ef429d-0af7-4388-985f-9e95c6c6dd6f" />
 <img width="682" height="462" alt="Honeycam 2026-07-01 15-46-22" src="https://github.com/user-attachments/assets/3d468a52-e4b9-40a4-b089-181bad716574" />
@@ -27,7 +29,6 @@ What this fork changes:
 - **AI Translation** – Context-aware translations that preserve tone and slang.
 - **Eco Mode** – Reduce API costs by grouping messages together.
 - **Outgoing Translation** – Write in your language and send translated messages while keeping the original visible.
-- **Custom Dictionary** – Override translations for names, game terms, and other custom phrases.
 - **Per-Channel Settings** – Configure different languages and translation engines for each server or DM.
 
 ---
@@ -75,7 +76,6 @@ pnpm build
 
 Configure your API key in the plugin settings.
 
-- **DeepL** – https://app.deepl.com/your-account/keys
 - **Gemini** – https://aistudio.google.com/api-keys
 - **DeepSeek** – https://platform.deepseek.com/
 
@@ -85,15 +85,6 @@ Configure your API key in the plugin settings.
 
 This plugin does not collect personal data. However, messages are sent to your chosen AI API; please use caution in channels with sensitive information.
 > **Disclaimer:** This plugin is not officially supported by Vencord.
-
-## Translation deadlines and errors
-
-Translation jobs have a **20-second total deadline**, including batching and queue waits.
-On timeout the loading state ends, a notification appears, and expired work is discarded.
-Idle workers cancel their active HTTP request; late results cannot replace a timed-out translation.
-This also applies to outgoing and manual translation. Economy mode releases a batch after at most 10 seconds so the API has time to respond.
-
-API errors distinguish missing/invalid keys, denied permissions, insufficient balance, missing models/endpoints, quota, rate limits, server/network failures, blocked content and invalid responses.
 
 ## Development checks
 
@@ -105,7 +96,3 @@ pnpm build
 pnpm exec eslint src/userplugins/alwaysTranslate
 node --test src/userplugins/alwaysTranslate/tests/regression.cjs
 ```
-
-The regression tests use mocked APIs and storage; they do not send messages or consume API credits.
-
-Cache format v3 separates engines, models, channels, prompts, dictionaries, and text-processing options. Older translation caches are not reused because they lack this metadata; messages will be translated again as needed. The custom dictionary is preserved.

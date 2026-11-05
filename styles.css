@@ -33,133 +33,6 @@
     40% { transform: scale(1); }
 }
 
-/* ?�?�?�?Message Pop-up Animation ?�?�?�?*/
-@keyframes bat-msg-pop-up {
-    from {
-        opacity: 0;
-        transform: translateY(15px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-.bat-pop-up {
-    animation: bat-msg-pop-up 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
-}
-
-
-
-.bat-popout {
-    background-color: var(--background-secondary) !important;
-    padding: 8px;
-    border-radius: 8px;
-    border: 1px solid var(--background-modifier-accent);
-    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.24);
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 180px;
-}
-
-.bat-popout-title {
-    padding: 4px 8px;
-    color: var(--header-secondary);
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-}
-
-.bat-popout-item {
-    padding: 8px;
-    background: transparent;
-    color: var(--interactive-normal);
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    text-align: left;
-    width: 100%;
-}
-
-.bat-popout-item:hover {
-    background: var(--background-modifier-hover);
-}
-
-.bat-popout-item[data-active="true"] {
-    color: var(--text-brand);
-    font-weight: 600;
-}
-
-.bat-popout-item--danger {
-    color: var(--text-danger);
-}
-
-.bat-popout-item--danger:hover {
-    background: var(--background-modifier-hover);
-}
-
-/* ?�?�?�?ClearCache ?�?�?�?*/
-.bat-cache-info {
-    color: var(--text-muted);
-    margin-bottom: 16px;
-    font-size: 14px;
-}
-
-/* %%% Dictionary Scrollbar %%% */
-.bat-dict-scroller::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-}
-.bat-dict-scroller::-webkit-scrollbar-track {
-    background-color: var(--scrollbar-thin-track, transparent);
-    border-radius: 4px;
-}
-.bat-dict-scroller::-webkit-scrollbar-thumb {
-    background-color: var(--scrollbar-thin-thumb, var(--background-tertiary, rgba(32, 34, 37, 0.6)));
-    border-radius: 4px;
-}
-.bat-dict-scroller::-webkit-scrollbar-thumb:hover {
-    background-color: var(--scrollbar-auto-thumb-hover, rgba(32, 34, 37, 0.8));
-}
-
-
-
-.bat-dict-scroller::-webkit-scrollbar {
-    width: 8px !important;
-    height: 8px !important;
-}
-.bat-dict-scroller::-webkit-scrollbar-track {
-    background-color: transparent !important;
-    border-radius: 4px !important;
-}
-.bat-dict-scroller::-webkit-scrollbar-thumb {
-    background-color: rgba(32, 34, 37, 0.6) !important;
-    border-radius: 4px !important;
-}
-.bat-dict-scroller::-webkit-scrollbar-thumb:hover {
-    background-color: rgba(32, 34, 37, 0.8) !important;
-}
-
-
-
-/* %%% Outgoing Translation Animation %%% */
-.bat-outgoing-overlay { color: var(--text-normal);
-    position: fixed;
-    bottom: 80px;
-    right: 24px;
-    background: var(--background-tertiary);
-    border: 1px solid var(--background-modifier-accent);
-    padding: 8px 12px;
-    border-radius: 8px;
-    box-shadow: var(--elevation-high);
-    display: flex;
-    align-items: center;
-    z-index: 9999;
-    pointer-events: none;
-    animation: bat-msg-pop-up 0.2s ease-out forwards;
-}
-
 body.bat-translating-active * {
     cursor: progress !important;
 }
@@ -216,3 +89,28 @@ body.bat-translating-active * {
 .bat-settings-field-label { margin-bottom: 6px; }
 .bat-settings-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0 8px; }
 
+
+.bat-translation-retry {
+    display: block;
+    margin-top: 4px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+.bat-translation-retry:hover,
+.bat-translation-retry:focus-visible {
+    color: var(--text-normal);
+    text-decoration: underline;
+}
+
+.bat-loading-count { font-size: 10px; opacity: 0.6; margin-left: 4px; font-family: monospace; user-select: none; }
+
+.bat-channel-group { margin: 12px 0; color: var(--text-normal); }
+.bat-channel-group > summary { font-weight: 600; padding: 10px 0; cursor: pointer; }
+.bat-channel-entry { margin-left: 12px; border-bottom: 1px solid var(--background-modifier-accent); }
+.bat-channel-entry > summary { padding: 10px 4px; cursor: pointer; overflow-wrap: anywhere; }
+.bat-channel-detail { display: flex; flex-direction: column; gap: 10px; padding: 8px 4px 16px; }

@@ -10,11 +10,11 @@ import { useEffect, useState } from "@webpack/common";
 import { settings } from "../settings";
 import { Logger } from "./logger";
 
-export type SecretName = "gemini" | "deepseek" | "deepl";
+export type SecretName = "gemini" | "deepseek";
 
 const Native = VencordNative.pluginHelpers.AlwaysTranslate as PluginNative<typeof import("../native")>;
 
-const secrets: Record<SecretName, string> = { gemini: "", deepseek: "", deepl: "" };
+const secrets: Record<SecretName, string> = { gemini: "", deepseek: "" };
 const listeners = new Set<() => void>();
 const saveTimers: Partial<Record<SecretName, number>> = {};
 
@@ -42,7 +42,6 @@ export function getApiKeys() {
     return {
         gemini: secrets.gemini,
         deepseek: secrets.deepseek,
-        deepl: secrets.deepl,
     };
 }
 
@@ -80,7 +79,6 @@ export async function setSecret(name: SecretName, value: string) {
 function loadLegacySecrets() {
     secrets.gemini = settings.store.geminiApiKey ?? "";
     secrets.deepseek = settings.store.deepseekApiKey ?? "";
-    secrets.deepl = settings.store.deeplApiKey ?? "";
 }
 
 /**
@@ -110,7 +108,7 @@ export async function initSecrets() {
 
     Logger.info("Secrets", "secure storage available", { available: true });
 
-    for (const name of ["gemini", "deepseek", "deepl"] as const) {
+    for (const name of ["gemini", "deepseek"] as const) {
         secrets[name] = await Native.batSecretGet(name).catch(() => "");
     }
 
@@ -118,7 +116,6 @@ export async function initSecrets() {
     const legacy: Array<[SecretName, string | undefined]> = [
         ["gemini", settings.store.geminiApiKey],
         ["deepseek", settings.store.deepseekApiKey],
-        ["deepl", settings.store.deeplApiKey],
     ];
 
     let migrated = false;
@@ -133,13 +130,13 @@ export async function initSecrets() {
     if (migrated) {
         settings.store.geminiApiKey = "";
         settings.store.deepseekApiKey = "";
-        settings.store.deeplApiKey = "";
         Logger.info("Secrets", "Migrated plaintext API keys to encrypted storage");
     }
 
     Logger.info("Secrets", "loaded", {
-        keys: (["gemini", "deepseek", "deepl"] as const).filter(name => !!secrets[name]),
+        keys: (["gemini", "deepseek"] as const).filter(name => !!secrets[name]),
     });
 
     notify();
 }
+

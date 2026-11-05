@@ -6,7 +6,6 @@
 
 import { TextInput, useState } from "@webpack/common";
 
-import { translateWithDeepL } from "../api/deepl";
 import { translateBatchWithDeepSeek } from "../api/deepseek";
 import { translateBatchWithGemini } from "../api/gemini";
 import { settings } from "../settings";
@@ -127,8 +126,7 @@ export function ApiKeysManager() {
     const missingForEngine =
         translationEngine === "gemini" && !keys.gemini ? "Gemini"
             : translationEngine === "deepseek" && !keys.deepseek ? "DeepSeek"
-                : translationEngine === "deepl" && !keys.deepl ? "DeepL"
-                    : null;
+                : null;
 
     return (
         <section className="bat-settings-section" aria-label="API keys">
@@ -213,21 +211,6 @@ export function ApiKeysManager() {
                                 placeholder="https://api.deepseek.com/chat/completions"
                             />
                         </Field>
-                    </Provider>
-
-                    <Provider
-                        title="DeepL"
-                        configured={!!keys.deepl}
-                        help="Consigue una clave en deepl.com/pro-api. Las gratuitas terminan en :fx."
-                    >
-                        <ApiKeyRow
-                            value={keys.deepl}
-                            placeholder="xxxxxxxx-xxxx-...:fx"
-                            onChange={v => setSecret("deepl", v)}
-                            onTest={async () => {
-                                await translateWithDeepL(["test"], "auto", "en", getSecret("deepl"));
-                            }}
-                        />
                     </Provider>
                 </div>
             )}
