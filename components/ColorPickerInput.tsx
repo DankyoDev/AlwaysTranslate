@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { ColorPicker, Forms } from "@webpack/common";
+import { ColorPicker } from "@webpack/common";
 
 import { settings } from "../settings";
+import { Forms } from "./LegacyWebpack";
 
 export function ColorPickerInput() {
     const { translationColor } = settings.use(["translationColor"]);
@@ -25,9 +26,9 @@ export function ColorPickerInput() {
 
     return (
         <section style={{ marginBottom: "20px" }}>
-            <Forms.FormTitle>Translation Color</Forms.FormTitle>
+            <Forms.FormTitle>Color de la traducción</Forms.FormTitle>
             <Forms.FormText style={{ marginBottom: "8px" }}>
-                Pick the text color for translated messages
+                Elige el color del texto traducido
             </Forms.FormText>
             <ColorPicker
                 suggestedColors={["#9aff99", "#ffffff", "#ff0000", "#ffff00", "#00ffff", "#ff00ff"]}

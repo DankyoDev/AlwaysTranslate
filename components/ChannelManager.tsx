@@ -5,318 +5,232 @@
  */
 
 import { Divider } from "@components/Divider";
-import { Button, ChannelStore, Forms, GuildStore, SearchableSelect, TextInput, UserStore, useState, useStateFromStores } from "@webpack/common";
+import { ChannelStore, GuildStore, SearchableSelect, TextInput, UserStore, useState, useStateFromStores } from "@webpack/common";
 
-import { showTranslationToast } from "../utils/toast";
-import { CHANNEL_ENGINE_OPTIONS, GLOBAL_ENGINE_OPTIONS, LANGUAGES } from "../constants";
-import {
-    addChannel as addCh,
-    removeChannel as removeCh,
-    settings,
-    updateChannel,
-} from "../settings";
+import { GLOBAL_ENGINE_OPTIONS, LANGUAGES } from "../constants";
+import { addChannel, clearGuildScope, clearUserScope, removeChannel, type ScopeConfig,settings, updateGuildScope, updateUserScope } from "../settings";
+import { readScope, type ScopeTarget } from "../utils/scopes";
+import { Button, Forms } from "./LegacyWebpack";
+import { openScopeEditor } from "./ScopeEditor";
 
-export interface PartialChannel {
-    id: string;
-    lang?: string;
-    engine?: string;
-    aiCustomPrompt?: string;
-    outgoingCustomPrompt?: string;
+const langLabel = (value: string) => LANGUAGES.find(l => l.value === value)?.label ?? value;
+
+function summarize(scope: ScopeConfig): string {
+    const parts: string[] = [];
+
+    if (scope.enabled !== undefined) parts.push(scope.enabled ? "on" : "off");
+    if (scope.targetLang !== undefined) parts.push(`yo: ${langLabel(scope.targetLang)}`);
+    if (scope.sourceLang !== undefined) parts.push(`ellos: ${langLabel(scope.sourceLang)}`);
+    if (scope.engine !== undefined) parts.push(GLOBAL_ENGINE_OPTIONS.find(o => o.value === scope.engine)?.label ?? scope.engine);
+    if (scope.outgoingLang !== undefined) parts.push(`salida: ${langLabel(scope.outgoingLang)}`);
+    if (scope.outgoing !== undefined) parts.push(`saliente ${scope.outgoing ? "sí" : "no"}`);
+
+    return parts.join(" · ");
+}
+
+function OverrideRow({ name, target, onRemove }: { name: string; target: ScopeTarget; onRemove(): void; }) {
+    const summary = summarize(readScope(target));
+
+    return (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: "1px solid var(--background-modifier-accent)" }}>
+            <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                <div style={{ fontWeight: 600, color: "var(--text-normal)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {name}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {summary || "Override vacío"}
+                </div>
+            </div>
+            <Button size={Button.Sizes.SMALL} color={Button.Colors.PRIMARY} onClick={() => openScopeEditor(target.kind === "guild" ? "guild" : target.kind === "channel" ? "channel" : "user", target.id)}>
+                Editar
+            </Button>
+            <Button size={Button.Sizes.SMALL} color={Button.Colors.RED} onClick={onRemove}>
+                Quitar
+            </Button>
+        </div>
+    );
+}
+
+function channelName(id: string): string {
+    try {
+        const channel = ChannelStore.getChannel?.(id);
+        if (channel?.name) return channel.guild_id ? `#${channel.name}` : channel.name;
+    } catch { }
+
+    return id;
+}
+
+function guildName(id: string): string {
+    try {
+        return GuildStore.getGuild?.(id)?.name ?? id;
+    } catch {
+        return id;
+    }
+}
+
+function userName(id: string): string {
+    try {
+        const user = UserStore.getUser?.(id);
+        return user?.globalName || user?.username || id;
+    } catch {
+        return id;
+    }
 }
 
 export function ChannelManager() {
-    const [query, setQuery] = useState("");
+    const {
+        channelList = [],
+        guildOverrides = {},
+        userOverrides = {},
+    } = settings.use(["channelList", "guildOverrides", "userOverrides"]);
+
     const [selectedChannel, setSelectedChannel] = useState<string | undefined>();
-    const [showIdInput, setShowIdInput] = useState(false);
-    const [expandedChannels, setExpandedChannels] = useState<string[]>([]);
-    const { channelList: channels = [], translationMode = "global", translationEngine = "gemini" } = settings.use(["channelList", "translationMode", "translationEngine"]);
-
-    const activeChannels = [...channels];
-
-    const groupedChannels: Record<string, { guildName: string, channels: PartialChannel[] }> = {};
-    groupedChannels.DM = { guildName: "Direct Messages", channels: [] };
-
-    for (const ch of activeChannels) {
-        const dCh = ChannelStore.getChannel?.(ch.id);
-        if (dCh && dCh.guild_id) {
-            const guildId = dCh.guild_id;
-            if (!groupedChannels[guildId]) {
-                const guildName = GuildStore.getGuild?.(guildId)?.name || `Unknown Guild (${guildId})`;
-                groupedChannels[guildId] = { guildName, channels: [] };
-            }
-            groupedChannels[guildId].channels.push(ch);
-        } else {
-            groupedChannels.DM.channels.push(ch);
-        }
-    }
-
-    const sortedGroups = Object.entries(groupedChannels)
-        .filter(([_, data]) => data.channels.length > 0)
-        .sort((a, b) => {
-            if (a[0] === "DM") return -1;
-            if (b[0] === "DM") return 1;
-            return a[1].guildName.localeCompare(b[1].guildName);
-        });
 
     const channelOptions = useStateFromStores([GuildStore, ChannelStore], () => {
-        const opts: { label: string, value: string, isDm: boolean }[] = [];
+        const options: Array<{ label: string; value: string; }> = [];
         const seen = new Set<string>();
+
         try {
             const guilds = GuildStore?.getGuilds?.() ?? {};
             for (const guildId in guilds) {
                 const guild = guilds[guildId];
                 const guildChannels = ChannelStore.getMutableGuildChannelsForGuild?.(guildId) ?? {};
-                for (const cId in guildChannels) {
-                    const ch = guildChannels[cId] as typeof guildChannels[string] & { isHidden?: () => boolean };
-                    const isHiddenPlugin = typeof ch.isHidden === "function" ? ch.isHidden() : false;
-                    const isHiddenName = ch.name?.includes("___hidden___");
 
-                    // 0: Text, 5: Announcement, 11: Public Thread, 12: Private Thread
-                    if ([0, 5, 11, 12].includes(ch.type) && !seen.has(ch.id) && !isHiddenPlugin && !isHiddenName) {
-                        seen.add(ch.id);
-                        opts.push({ label: `${ch.name} (${guild.name})`, value: ch.id, isDm: false });
-                    }
+                for (const id in guildChannels) {
+                    const channel = guildChannels[id];
+                    // 0: text, 5: announcement, 11/12: threads
+                    if (![0, 5, 11, 12].includes(channel.type) || seen.has(channel.id)) continue;
+
+                    seen.add(channel.id);
+                    options.push({ label: `#${channel.name} (${guild.name})`, value: channel.id });
                 }
             }
-            const dms = ChannelStore.getSortedPrivateChannels?.() ?? [];
-            for (const ch of dms) {
-                if (ch && ch.id && !seen.has(ch.id)) {
-                    seen.add(ch.id);
-                    let dmName = ch.name;
-                    // ch.recipients holds user IDs, ch.rawRecipients might hold user objects
-                    const recipients = ch.recipients || (ch.rawRecipients ? ch.rawRecipients.map((r: any) => r.id) : []);
 
-                    if (!dmName && recipients && recipients.length > 0) {
-                        try {
-                            const users = recipients.map((id: string) => typeof UserStore.getUser === "function" ? UserStore.getUser(id) : null).filter((user): user is NonNullable<typeof user> => user !== null);
-                            if (users.length > 0) {
-                                dmName = users.map((u: { globalName?: string; username?: string }) => u.globalName || u.username).join(", ");
-                            }
-                        } catch(e) {}
-                    }
+            for (const channel of ChannelStore.getSortedPrivateChannels?.() ?? []) {
+                if (!channel?.id || seen.has(channel.id)) continue;
 
-                    const finalName = dmName || "Unknown DM";
-                    if (!finalName.toLowerCase().includes("deleted user")) {
-                        opts.push({ label: `${finalName} (DM)`, value: ch.id, isDm: true });
-                    }
-                }
+                seen.add(channel.id);
+                options.push({ label: `${channel.name ?? channel.id} (DM)`, value: channel.id });
             }
         } catch (e) {
-            console.error("[AlwaysTranslate] Channel map error:", e);
+            console.error("[AlwaysTranslate] Channel picker error:", e);
         }
-        opts.sort((a, b) => {
-            if (a.isDm !== b.isDm) return a.isDm ? 1 : -1;
-            return a.label.localeCompare(b.label);
-        });
-        return opts.map(o => ({ label: o.label, value: o.value }));
+
+        return options.sort((a, b) => a.label.localeCompare(b.label));
     });
 
-    const handleAdd = (id: string | undefined) => {
-        if (!id) return;
-        const cleanId = id.trim();
-        if (!cleanId) return;
-
-        if (!/^\d{17,20}$/.test(cleanId)) {
-            showTranslationToast("Invalid channel ID format.");
-            setSelectedChannel(undefined);
-            return;
-        }
-
-        if (channels.some((c: PartialChannel) => c.id === cleanId)) {
-            showTranslationToast("Channel already added.");
-            setSelectedChannel(undefined);
-            return;
-        }
-
-        addCh(cleanId, "auto");
-        setQuery("");
-        setSelectedChannel(undefined);
-    };
-
-    const getChannelName = (id: string): string => {
-        try {
-            const ch = ChannelStore.getChannel?.(id);
-            if (ch?.name) return ch.guild_id ? `#${ch.name}` : ch.name;
-            const recipients = ch?.recipients || (ch?.rawRecipients ? ch.rawRecipients.map((r: any) => r.id) : null);
-            if (recipients && recipients.length > 0) {
-                const users = recipients.map((uid: string) => UserStore.getUser?.(uid)).filter(Boolean);
-                if (users.length > 0) return users.map((u: { globalName?: string; username?: string }) => u.globalName || u.username).join(", ");
-            }
-        } catch { /* noop */ }
-        return id;
-    };
-
-    const engineOpts = CHANNEL_ENGINE_OPTIONS.map(opt => {
-        if (opt.value === "default") {
-            const globalLabel = GLOBAL_ENGINE_OPTIONS.find(o => o.value === settings.store.translationEngine)?.label || "Unknown";
-            return { ...opt, label: `Default (${globalLabel})` };
-        }
-        return opt;
-    });
+    const guildIds = Object.keys(guildOverrides);
+    const userIds = Object.keys(userOverrides);
 
     return (
-        <section style={{ marginTop: 16 }}>
-            <Forms.FormTitle>
-                {translationMode === "global" ? "Channel-specific settings" : "Selected channels"}
-            </Forms.FormTitle>
+        <section aria-label="Overrides de traducción">
+            <Forms.FormTitle>Overrides de canal</Forms.FormTitle>
             <Forms.FormText>
-                {translationMode === "global"
-                    ? "Set an engine, language and prompts per channel."
-                    : "Only listed channels are translated automatically."}
-                <br />
-                Channel language: their language. Auto detects incoming text only.
+                Activa/desactiva por canal, tu idioma, su idioma y el motor. Vacío significa que hereda del servidor.
             </Forms.FormText>
 
-            <Divider style={{ marginTop: "16px", marginBottom: "16px" }} />
-
-            <div>
-                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                    <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
-                        <div style={{ flex: "1 1 200px" }}>
-                            <SearchableSelect
-                                options={channelOptions}
-                                value={selectedChannel}
-                                onChange={(val: string) => {
-                                    setSelectedChannel(val);
-                                    handleAdd(val);
-                                }}
-                                placeholder="Search channel or DM name to add..."
-                                closeOnSelect={true}
-                                maxVisibleItems={8}
-                            />
-                        </div>
-                    </div>
-
-                    <Button size={Button.Sizes.SMALL} color={Button.Colors.PRIMARY}
-                        look={Button.Looks.FILLED} onClick={() => setShowIdInput(!showIdInput)}>
-                        {showIdInput ? "Close channel ID" : "Add by channel ID"}
-                    </Button>
-
-                    {showIdInput && (
-                        <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
-                            <div style={{ flex: "1 1 200px", maxWidth: "300px" }}>
-                                <TextInput
-                                    placeholder="Enter raw Channel or DM ID..."
-                                    value={query}
-                                    onChange={setQuery}
-                                />
-                            </div>
-                            <Button
-                                onClick={() => handleAdd(query)}
-                                disabled={!query.trim()}
-                                color={Button.Colors.GREEN}
-                            >
-                                Add
-                            </Button>
-                        </div>
-                    )}
-                </div>
+            <div style={{ margin: "8px 0" }}>
+                <SearchableSelect
+                    options={channelOptions.filter(o => !channelList.some(c => c.id === o.value))}
+                    value={selectedChannel}
+                    onChange={(value: string) => {
+                        if (!value) return;
+                        addChannel(value, "auto", { enabled: true });
+                        setSelectedChannel(undefined);
+                    }}
+                    placeholder="Añadir override de canal…"
+                    closeOnSelect
+                    maxVisibleItems={8}
+                />
             </div>
 
-            <Divider style={{ marginTop: "16px", marginBottom: "16px" }} />
+            {channelList.length === 0
+                ? <Forms.FormText>Todavía no hay overrides de canal.</Forms.FormText>
+                : channelList.map(channel => (
+                    <OverrideRow
+                        key={channel.id}
+                        name={channelName(channel.id)}
+                        target={{ kind: "channel", id: channel.id }}
+                        onRemove={() => removeChannel(channel.id)}
+                    />
+                ))}
 
-            <div>
-                {activeChannels.length === 0 ? (
-                    <Forms.FormText>
-                        {translationMode === "global"
-                            ? "No channel overrides."
-                            : "No channels added."}
-                    </Forms.FormText>
-                ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: "24px", marginTop: "8px" }}>
-                        {sortedGroups.map(([guildId, { guildName, channels }]) => (
-                            <div key={guildId} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                                <div style={{ fontWeight: 600, color: "var(--header-primary)", fontSize: "16px", paddingBottom: "4px", borderBottom: "1px solid var(--background-modifier-accent)" }}>
-                                    {guildName}
-                                </div>
-                                <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-                                    {channels.map((ch: PartialChannel) => (
-                                        <div key={ch.id} style={{ display: "flex", flexDirection: "column", gap: "8px", padding: "12px 0", borderBottom: "1px solid var(--background-modifier-accent)" }}>
-                                            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
-                                    <div style={{ flex: "1 1 auto", minWidth: 0, marginRight: "16px" }}>
-                                        <div style={{ fontWeight: 600, color: "var(--text-normal)", marginBottom: "2px", padding: "2px 0", lineHeight: "1.3", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                                            {getChannelName(ch.id)}
-                                        </div>
-                                        <div style={{ fontSize: "12px", color: "var(--text-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                                            ID: {ch.id}
-                                        </div>
-                                    </div>
+            <Divider style={{ margin: "16px 0" }} />
 
-                                    <div className="bat-channel-controls">
-                                        {(
-                                            <>
-                                                <div style={{ minWidth: 0 }}>
-                                                    <div className="bat-settings-field-label">Automatic engine</div>
-                                                    <SearchableSelect
-                                                        value={ch.engine ?? "default"}
-                                                        options={engineOpts}
-                                                        onChange={(val: string) => {
-                                                            updateChannel(ch.id, { engine: val === "default" ? undefined : val });
-                                                        }}
-                                                        placeholder="Engine"
-                                                        popoutPosition="left"
-                                                    />
-                                                </div>
+            <Forms.FormTitle>Overrides de servidor</Forms.FormTitle>
+            <Forms.FormText>
+                Añade uno con el ID del servidor o haz clic derecho en un servidor → «AlwaysTranslate: ajustes del servidor…».
+            </Forms.FormText>
 
-                                                <div style={{ minWidth: 0 }}>
-                                                    <div className="bat-settings-field-label">Channel language</div>
-                                                    <SearchableSelect
-                                                        value={ch.lang}
-                                                        options={[...LANGUAGES]}
-                                                        onChange={(val: string) => updateChannel(ch.id, { lang: val })}
-                                                        placeholder="Channel language"
-                                                        popoutPosition="left"
-                                                    />
-                                                </div>
-                                            </>
-                                        )}
+            <IdAdder
+                label="Añadir servidor"
+                placeholder="ID del servidor"
+                onAdd={id => updateGuildScope(id, { enabled: true })}
+            />
 
-                                        <div style={{ display: "contents" }}>
-                                            <Button size={Button.Sizes.SMALL} color={Button.Colors.PRIMARY} look={Button.Looks.FILLED} onClick={() => setExpandedChannels(ids => ids.includes(ch.id) ? ids.filter(id => id !== ch.id) : [...ids, ch.id])}>
-                                                {expandedChannels.includes(ch.id) ? "Close prompts" : "Edit prompts"}
-                                            </Button>
-                                            <Button
-                                                color={Button.Colors.RED}
-                                                look={Button.Looks.FILLED}
-                                                size={Button.Sizes.SMALL}
-                                                onClick={() => removeCh(ch.id)}
-                                            >
-                                                Remove
-                                            </Button>
-                                        </div>
-                                    </div>
-                                </div>
+            {guildIds.length === 0
+                ? <Forms.FormText>Todavía no hay overrides de servidor.</Forms.FormText>
+                : guildIds.map(id => (
+                    <OverrideRow
+                        key={id}
+                        name={guildName(id)}
+                        target={{ kind: "guild", id }}
+                        onRemove={() => clearGuildScope(id)}
+                    />
+                ))}
 
-                                            {expandedChannels.includes(ch.id) && (
-                                                <div style={{ marginTop: "8px" }}>
-                                                    <div style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-muted)", marginBottom: "4px" }}>
-                                                        Incoming prompt
-                                                    </div>
-                                                    <TextInput
-                                                        value={ch.aiCustomPrompt ?? ""}
-                                                        onChange={(val: string) => updateChannel(ch.id, { aiCustomPrompt: val || undefined })}
-                                                        placeholder="e.g. Keep the original tone."
-                                                        style={{ width: "100%" }}
-                                                    />
-                                                    <div style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-muted)", marginTop: "12px", marginBottom: "4px" }}>
-                                                        Outgoing prompt
-                                                    </div>
-                                                    <TextInput
-                                                        value={ch.outgoingCustomPrompt ?? ""}
-                                                        onChange={(val: string) => updateChannel(ch.id, { outgoingCustomPrompt: val || undefined })}
-                                                        placeholder="e.g. Use a friendly tone."
-                                                        style={{ width: "100%" }}
-                                                    />
-                                                </div>
-                                            )}
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                )}
-            </div>
+            <Divider style={{ margin: "16px 0" }} />
+
+            <Forms.FormTitle>Overrides de usuario</Forms.FormTitle>
+            <Forms.FormText>
+                Los overrides de usuario mandan sobre canal y servidor. Añade uno con el ID del usuario o haz clic derecho en un usuario.
+            </Forms.FormText>
+
+            <IdAdder
+                label="Añadir usuario"
+                placeholder="ID del usuario"
+                onAdd={id => {
+                    updateUserScope(id, "guild", { enabled: true });
+                    updateUserScope(id, "dm", { enabled: true });
+                }}
+            />
+
+            {userIds.length === 0
+                ? <Forms.FormText>Todavía no hay overrides de usuario.</Forms.FormText>
+                : userIds.map(id => (
+                    <OverrideRow
+                        key={id}
+                        name={userName(id)}
+                        target={{ kind: "user-guild", id }}
+                        onRemove={() => {
+                            clearUserScope(id, "guild");
+                            clearUserScope(id, "dm");
+                        }}
+                    />
+                ))}
         </section>
+    );
+}
+
+function IdAdder({ label, placeholder, onAdd }: { label: string; placeholder: string; onAdd(id: string): void; }) {
+    const [value, setValue] = useState("");
+
+    return (
+        <div style={{ display: "flex", gap: 8, margin: "8px 0" }}>
+            <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                <TextInput value={value} onChange={setValue} placeholder={placeholder} />
+            </div>
+            <Button
+                size={Button.Sizes.SMALL}
+                color={Button.Colors.PRIMARY}
+                disabled={!value.trim()}
+                onClick={() => {
+                    onAdd(value.trim());
+                    setValue("");
+                }}
+            >
+                {label}
+            </Button>
+        </div>
     );
 }

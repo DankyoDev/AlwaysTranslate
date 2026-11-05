@@ -2,6 +2,21 @@
 
 Real-time AI translation for Vencord.
 
+## About this fork
+
+Fork of [komi-juru/AlwaysTranslate](https://github.com/komi-juru/AlwaysTranslate), maintained by [DankyoDev](https://github.com/DankyoDev).
+
+What this fork changes:
+
+- **Google Translate engine**, free and without an API key, next to Gemini, DeepSeek and DeepL.
+- **Scope hierarchy:** user > channel > server > global, merged layer by layer, with a visual editor for each scope.
+- **Outgoing translation** with preview, a target language per scope and the original message kept visible.
+- **API keys encrypted at rest** with the OS keychain (DPAPI on Windows) through Electron's `safeStorage`. The provider requests run in the main process instead of the renderer.
+- **Debug log:** optional, written to `AlwaysTranslate.log`, with a viewer in the plugin settings. Keys are never logged.
+- **Settings reworked** and translated into Spanish: overview page, dropdowns, scope editor, presets and a per-scope dictionary.
+- **Reliability:** bounded waits, retries with backoff, rate-limit cooldowns, clearer API errors and a scope-aware cache.
+- **Tests** for scope resolution, output sanitization and language detection.
+
 <img width="583" height="698" alt="image" src="https://github.com/user-attachments/assets/d3ef429d-0af7-4388-985f-9e95c6c6dd6f" />
 <img width="682" height="462" alt="Honeycam 2026-07-01 15-46-22" src="https://github.com/user-attachments/assets/3d468a52-e4b9-40a4-b089-181bad716574" />
 <img width="682" height="341" alt="Honeycam 2026-07-01 18-22-25" src="https://github.com/user-attachments/assets/46629439-bfe3-4544-b7d2-cdabbcfa39aa" />
@@ -40,7 +55,7 @@ git clone https://github.com/Vendicated/Vencord
 cd Vencord/src
 mkdir userplugins
 cd userplugins
-git clone https://github.com/komi-juru/AlwaysTranslate.git alwaysTranslate
+git clone https://github.com/DankyoDev/AlwaysTranslate.git alwaysTranslate
 pnpm build
 pnpm inject
 ```

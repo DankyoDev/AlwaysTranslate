@@ -7,6 +7,7 @@
 import { PluginNative } from "@utils/types";
 
 import { settings } from "../settings";
+import { Logger, preview } from "../utils/logger";
 import { httpError } from "./errors";
 import { buildDeepSeekSystemPrompt, buildDeepSeekUserPrompt } from "./geminiPrompt";
 import { nativeRequest } from "./nativeRequest";
@@ -21,13 +22,14 @@ export async function translateBatchWithDeepSeek(
     dmPrompt: string,
     modelName: string,
     signal?: AbortSignal,
-    baseUrl?: string
+    baseUrl?: string,
+    context?: string
 ): Promise<{ id: string; text: string }[]> {
     if (!messages.length) return [];
     if (!apiKey) throw new Error("API key missing");
 
     const systemPrompt = buildDeepSeekSystemPrompt();
-    const userPrompt = buildDeepSeekUserPrompt(targetLang, dmPrompt, messages);
+    const userPrompt = buildDeepSeekUserPrompt(targetLang, dmPrompt, messages, context);
 
     const endpoint = baseUrl || settings.store.deepseekBaseUrl || "https://api.deepseek.com/chat/completions";
     const actualModelName = modelName || settings.store.deepseekModel || "deepseek-v4-flash";
@@ -50,6 +52,15 @@ export async function translateBatchWithDeepSeek(
         temperature: 0.3,
         max_tokens: 8192
     };
+
+    Logger.debug("DeepSeek", "request", {
+        model: actualModelName,
+        endpoint,
+        systemPromptChars: systemPrompt.length,
+        userPromptChars: userPrompt.length,
+        systemPrompt: preview(systemPrompt, 2500),
+        userPrompt: preview(userPrompt, 2500),
+    });
 
     if (!isR1) {
         payload.response_format = { type: "json_object" };
@@ -76,6 +87,8 @@ export async function translateBatchWithDeepSeek(
     if (!resultText) {
         throw new Error("Empty response from DeepSeek API");
     }
+
+    Logger.debug("DeepSeek", "raw response", { chars: resultText.length, text: preview(resultText, 2000) });
 
     try {
         let cleanJson = resultText.trim();

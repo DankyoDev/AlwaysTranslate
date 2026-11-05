@@ -20,7 +20,7 @@ function toDeepLLang(lang: string, isSource: boolean): string {
 
 import { PluginNative } from "@utils/types";
 
-import { Logger } from "../utils/logger";
+import { Logger, preview } from "../utils/logger";
 // Vencord Native Helper for CORS bypass
 import { httpError } from "./errors";
 import { nativeRequest } from "./nativeRequest";
@@ -45,12 +45,23 @@ export async function translateWithDeepL(
         ...(sourceLang !== "auto" && { source_lang: toDeepLLang(sourceLang, true) }),
     });
 
+    Logger.debug("DeepL", "request", {
+        free: isFree,
+        sourceLang,
+        targetLang,
+        texts: texts.length,
+        chars: texts.reduce((total, text) => total + text.length, 0),
+        preview: preview(texts.join(" | "), 400),
+    });
+
     const res = await nativeRequest(id => Native.batDeeplFetch(isFree, apiKey.trim(), payload, id), signal);
     if (!res.ok) throw httpError(res.status, String(res.data));
 
     try {
         const data = JSON.parse(res.data);
-        return data.translations.map((t: { text?: string }) => t.text || "");
+        const translations = data.translations.map((t: { text?: string }) => t.text || "");
+        Logger.debug("DeepL", "response", { count: translations.length, preview: preview(translations.join(" | "), 400) });
+        return translations;
     } catch (e) {
         Logger.error("DeepL", "Failed to parse API response", e);
         throw new Error("Failed to parse DeepL API response");

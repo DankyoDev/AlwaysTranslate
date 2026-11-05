@@ -4,10 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-
-
-import { showTranslationToast } from "../utils/toast";
 import { type GeminiQuotaKind, type GeminiQuotaLockState,settings } from "../settings";
+import { showTranslationToast } from "../utils/toast";
 import { describeApiError } from "./errors";
 
 const recentToasts = new Map<string, number>();

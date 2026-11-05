@@ -4,16 +4,17 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { Forms, SearchableSelect, TextInput } from "@webpack/common";
+import { SearchableSelect, TextInput } from "@webpack/common";
 
 import { reScheduleAllWorkers } from "../api/translate";
 import { settings } from "../settings";
+import { Forms } from "./LegacyWebpack";
 
 const presets = [
-    { name: "Real-time", threshold: 1, wait: 0 },
-    { name: "Balanced", threshold: 3, wait: 10 },
-    { name: "Economy", threshold: 10, wait: 30 },
-    { name: "Sleep", threshold: 250, wait: 0 }
+    { name: "Tiempo real", threshold: 1, wait: 0 },
+    { name: "Equilibrado", threshold: 3, wait: 10 },
+    { name: "Económico", threshold: 10, wait: 30 },
+    { name: "Dormido", threshold: 250, wait: 0 }
 ];
 
 export function SettingsPresets() {
@@ -27,12 +28,12 @@ export function SettingsPresets() {
 
     return (
         <section className="bat-settings-section">
-            <Forms.FormTitle>Translation timing</Forms.FormTitle>
-            <Forms.FormText>Gemini and DeepSeek batching.</Forms.FormText>
+            <Forms.FormTitle>Cadencia de traducción</Forms.FormTitle>
+            <Forms.FormText>Agrupación de Gemini y DeepSeek.</Forms.FormText>
             <div style={{ marginTop: 8 }}>
                 <SearchableSelect
-                    value={current?.name ?? "Custom"}
-                    options={[...presets.map(p => ({ label: p.name, value: p.name })), { label: "Custom", value: "Custom" }]}
+                    value={current?.name ?? "Personalizado"}
+                    options={[...presets.map(p => ({ label: p.name, value: p.name })), { label: "Personalizado", value: "Personalizado" }]}
                     onChange={(value: string) => {
                         const preset = presets.find(p => p.name === value);
                         if (preset) update(preset.threshold, preset.wait);
@@ -41,21 +42,21 @@ export function SettingsPresets() {
             </div>
             <div className="bat-settings-fields">
                 <div>
-                    <Forms.FormTitle>Messages</Forms.FormTitle>
+                    <Forms.FormTitle>Mensajes</Forms.FormTitle>
                     <TextInput type="number" value={String(threshold)} onChange={(value: string) => {
                         const count = Number(value);
                         if (value && Number.isInteger(count) && count >= 1 && count <= 1000) update(count, wait);
                     }} />
                 </div>
                 <div>
-                    <Forms.FormTitle>Wait (seconds)</Forms.FormTitle>
+                    <Forms.FormTitle>Espera (segundos)</Forms.FormTitle>
                     <TextInput type="number" value={String(wait)} onChange={(value: string) => {
                         const seconds = Number(value);
                         if (value && Number.isInteger(seconds) && seconds >= 0 && seconds <= 300) update(threshold, seconds);
                     }} />
                 </div>
             </div>
-            <Forms.FormText>0 seconds: wait for the message count.</Forms.FormText>
+            <Forms.FormText>0 segundos: esperar al número de mensajes.</Forms.FormText>
         </section>
     );
 }

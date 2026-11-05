@@ -10,13 +10,16 @@ import { openPluginModal } from "@components/settings";
 import { findComponentByCodeLazy } from "@webpack";
 import { Menu, Popout, SelectedChannelStore, useRef, useState, useStateFromStores } from "@webpack/common";
 
-import { showTranslationToast } from "../utils/toast";
 import { reScheduleAllWorkers } from "../api/translate";
 import { deeplWorkers, geminiWorkers } from "../api/worker";
 import { CHANNEL_ENGINE_OPTIONS, GLOBAL_ENGINE_OPTIONS, LANGUAGES } from "../constants";
-import { addChannel, settings, updateChannel } from "../settings";
+import { addChannel, getGuildScope, settings, updateChannel, updateGuildScope } from "../settings";
 import { triggerManualBatch } from "../utils/manual";
+import { getGuildIdForChannel, resolveConfig } from "../utils/scopes";
+import { getApiKeys } from "../utils/secrets";
+import { showTranslationToast } from "../utils/toast";
 import { DeepLIcon, DeepSeekIcon,GeminiIcon } from "./Icons";
+import { openScopeEditor } from "./ScopeEditor";
 
 const HeaderBarIconNative = findComponentByCodeLazy(
     ".HEADER_BAR_BADGE_BOTTOM,",
@@ -41,25 +44,27 @@ export function TranslateHeaderButton() {
     // Reactively update when settings change
     const {
         channelList = [],
-        translationEngine = "gemini",
+        translationEngine = "google",
         translateOutgoing = false,
         hideOriginal = false,
         translationMode = "global",
-        manualTranslationEngine = "gemini",
+        manualTranslationEngine = "google",
         APIEcoModeThreshold = 3,
         APIMaxBatchWait = 10
-    } = settings.use(["channelList", "translationEngine", "translateOutgoing", "hideOriginal", "translationMode", "manualTranslationEngine", "APIEcoModeThreshold", "APIMaxBatchWait"]);
+    } = settings.use(["channelList", "translationEngine", "translateOutgoing", "hideOriginal", "translationMode", "manualTranslationEngine", "APIEcoModeThreshold", "APIMaxBatchWait", "guildOverrides"]);
 
 
     const channelConfig = channelList.find(c => c.id === channelId);
     const isChannelListed = !!channelConfig;
 
-    const effectiveEngine = isChannelListed && channelConfig?.engine && channelConfig.engine !== "default"
-        ? channelConfig.engine
-        : translationEngine;
+    const guildId = getGuildIdForChannel(channelId);
+    const guildScope = guildId ? getGuildScope(guildId) : undefined;
+    const resolved = resolveConfig({ channelId, guildId, isDM: !guildId });
 
+    const effectiveEngine = resolved.engine;
+    const isActive = resolved.enabled;
 
-    const isActive = effectiveEngine !== "disable" && (translationMode === "global" || isChannelListed);
+    const triLabel = (value?: boolean) => value === undefined ? "Heredar" : value ? "Sí" : "No";
 
     const ActiveIcon = (props: any) => {
         if (!isActive) return <TranslateIcon {...props} />;
@@ -72,24 +77,24 @@ export function TranslateHeaderButton() {
 
     const renderMenu = () => {
         if (!channelId) return null;
-        const engineLabel = (value: string) => value === "disable" ? "Off" : GLOBAL_ENGINE_OPTIONS.find(o => o.value === value)?.label ?? value;
+        const engineLabel = (value: string) => value === "disable" ? "Desactivado" : GLOBAL_ENGINE_OPTIONS.find(o => o.value === value)?.label ?? value;
         const currentEngine = channelConfig?.engine || "default";
         const currentLanguage = channelConfig?.lang || "auto";
         const presets = [
-            { name: "Real-time", threshold: 1, wait: 0 },
-            { name: "Balanced", threshold: 3, wait: 10 },
-            { name: "Economy", threshold: 10, wait: 30 },
-            { name: "Sleep", threshold: 250, wait: 0 }
+            { name: "Tiempo real", threshold: 1, wait: 0 },
+            { name: "Equilibrado", threshold: 3, wait: 10 },
+            { name: "Económico", threshold: 10, wait: 30 },
+            { name: "Dormido", threshold: 250, wait: 0 }
         ];
         const selectedPreset = presets.find(p => p.threshold === APIEcoModeThreshold && p.wait === APIMaxBatchWait);
         return (
-            <Menu.Menu navId="bat-translate-menu" onClose={() => setShow(false)} aria-label="AlwaysTranslate settings">
-                <Menu.MenuGroup label="This channel">
-                    <Menu.MenuItem id="auto-engine-select" label={`Automatic translation: ${isActive ? engineLabel(effectiveEngine) : "Off"}`}
-                        subtext={!isChannelListed && translationMode !== "global" ? "Select an engine to enable." : "Off preserves channel settings."}>
+            <Menu.Menu navId="bat-translate-menu" onClose={() => setShow(false)} aria-label="Ajustes de AlwaysTranslate">
+                <Menu.MenuGroup label="Este canal">
+                    <Menu.MenuItem id="auto-engine-select" label={`Traducción automática: ${isActive ? engineLabel(effectiveEngine) : "Desactivado"}`}
+                        subtext={!isChannelListed && translationMode !== "global" ? "Elige un motor para activarla." : "Desactivado conserva los ajustes del canal."}>
                         {CHANNEL_ENGINE_OPTIONS.map(opt => (
                             <Menu.MenuRadioItem key={opt.value} id={`engine-${opt.value}`} group="bat-auto-engine"
-                                label={opt.value === "default" ? `Follow default (${engineLabel(translationEngine)})` : engineLabel(opt.value)}
+                                label={opt.value === "default" ? `Seguir predeterminado (${engineLabel(translationEngine)})` : engineLabel(opt.value)}
                                 checked={!isChannelListed && translationMode !== "global" ? opt.value === "disable" : currentEngine === opt.value}
                                 dontCloseOnActionIf={() => true}
                                 action={() => {
@@ -98,8 +103,8 @@ export function TranslateHeaderButton() {
                                 }} />
                         ))}
                     </Menu.MenuItem>
-                    <Menu.MenuItem id="lang-select" label={`Channel language: ${LANGUAGES.find(l => l.value === currentLanguage)?.label ?? currentLanguage}`}
-                        subtext="Their language. Auto: incoming only.">
+                    <Menu.MenuItem id="lang-select" label={`Idioma del canal: ${LANGUAGES.find(l => l.value === currentLanguage)?.label ?? currentLanguage}`}
+                        subtext="Su idioma. Auto: solo entrantes.">
                         {LANGUAGES.map(lang => (
                             <Menu.MenuRadioItem key={lang.value} id={`lang-${lang.value}`} group="bat-channel-language"
                                 label={lang.label} checked={currentLanguage === lang.value} dontCloseOnActionIf={() => true}
@@ -112,22 +117,58 @@ export function TranslateHeaderButton() {
                                 }} />
                         ))}
                     </Menu.MenuItem>
+                    <Menu.MenuItem id="channel-translate" label={`Traducir este canal: ${triLabel(channelConfig?.enabled)}`}>
+                        {[
+                            { label: "Heredar", value: undefined },
+                            { label: "Sí", value: true },
+                            { label: "No", value: false },
+                        ].map((opt, i) => (
+                            <Menu.MenuRadioItem key={i} id={`channel-translate-${i}`} group="bat-channel-enabled"
+                                label={opt.label} checked={channelConfig?.enabled === opt.value} dontCloseOnActionIf={() => true}
+                                action={() => { addChannel(channelId, "auto"); updateChannel(channelId, { enabled: opt.value }); }} />
+                        ))}
+                    </Menu.MenuItem>
+                    <Menu.MenuItem id="channel-scope-settings" label="Ajustes del canal…"
+                        action={() => {
+                            setShow(false);
+                            openScopeEditor("channel", channelId, "Traducción del canal");
+                        }} />
                 </Menu.MenuGroup>
                 <Menu.MenuSeparator />
-                <Menu.MenuGroup label="All channels — shared settings">
-                    <Menu.MenuItem id="translation-scope" label={`Automatic scope: ${translationMode === "global" ? "All channels" : "Selected channels only"}`} disabled />
-                    <Menu.MenuItem id="manual-engine-select" label={`Manual button engine: ${engineLabel(manualTranslationEngine)}`}>
+                <Menu.MenuGroup label="Este servidor">
+                    <Menu.MenuItem id="guild-translate" label={`Traducir este servidor: ${triLabel(guildScope?.enabled)}`} disabled={!guildId}>
+                        {[
+                            { label: "Heredar", value: undefined },
+                            { label: "Sí", value: true },
+                            { label: "No", value: false },
+                        ].map((opt, i) => (
+                            <Menu.MenuRadioItem key={i} id={`guild-translate-${i}`} group="bat-guild-enabled"
+                                label={opt.label} checked={guildScope?.enabled === opt.value} dontCloseOnActionIf={() => true}
+                                action={() => { if (guildId) updateGuildScope(guildId, { enabled: opt.value }); }} />
+                        ))}
+                    </Menu.MenuItem>
+                    <Menu.MenuItem id="guild-scope-settings" label="Ajustes del servidor…" disabled={!guildId}
+                        action={() => {
+                            if (!guildId) return;
+                            setShow(false);
+                            openScopeEditor("guild", guildId, "Traducción del servidor");
+                        }} />
+                </Menu.MenuGroup>
+                <Menu.MenuSeparator />
+                <Menu.MenuGroup label="Todos los canales — ajustes compartidos">
+                    <Menu.MenuItem id="translation-scope" label={`Ámbito automático: ${translationMode === "global" ? "Todos los canales" : "Solo canales seleccionados"}`} disabled />
+                    <Menu.MenuItem id="manual-engine-select" label={`Motor del botón manual: ${engineLabel(manualTranslationEngine)}`}>
                         {GLOBAL_ENGINE_OPTIONS.map(opt => (
                             <Menu.MenuRadioItem key={opt.value} id={`manual-engine-${opt.value}`} group="bat-manual-engine"
                                 label={engineLabel(opt.value)} checked={manualTranslationEngine === opt.value} dontCloseOnActionIf={() => true}
                                 action={() => { settings.store.manualTranslationEngine = opt.value; }} />
                         ))}
                     </Menu.MenuItem>
-                    <Menu.MenuItem id="eco-preset-select" label={`Batch timing: ${selectedPreset?.name ?? "Custom"}`}
-                        subtext="Gemini and DeepSeek · All channels">
+                    <Menu.MenuItem id="eco-preset-select" label={`Cadencia de lotes: ${selectedPreset?.name ?? "Personalizado"}`}
+                        subtext="Gemini y DeepSeek · Todos los canales">
                         {presets.map(preset => (
                             <Menu.MenuRadioItem key={preset.name} id={`preset-${preset.name.toLowerCase()}`} group="bat-batch-preset"
-                                label={preset.name} subtext={`${preset.threshold} messages / ${preset.wait ? `up to ${preset.wait}s` : "no timer"}`}
+                                label={preset.name} subtext={`${preset.threshold} mensajes / ${preset.wait ? `hasta ${preset.wait}s` : "sin temporizador"}`}
                                 checked={selectedPreset === preset} dontCloseOnActionIf={() => true}
                                 action={() => {
                                     settings.store.APIEcoModeThreshold = preset.threshold;
@@ -136,19 +177,33 @@ export function TranslateHeaderButton() {
                                 }} />
                         ))}
                     </Menu.MenuItem>
-                    <Menu.MenuCheckboxItem id="toggle-outgoing" label="Translate my outgoing messages" checked={translateOutgoing}
+                    <Menu.MenuCheckboxItem id="toggle-outgoing" label="Traducir mis mensajes salientes" checked={translateOutgoing}
                         dontCloseOnActionIf={() => true} action={() => { settings.store.translateOutgoing = !settings.store.translateOutgoing; }} />
-                    <Menu.MenuCheckboxItem id="toggle-hide-original" label="Hide original messages" checked={hideOriginal}
+                    <Menu.MenuCheckboxItem id="toggle-hide-original" label="Ocultar mensajes originales" checked={hideOriginal}
                         dontCloseOnActionIf={() => true} action={() => { settings.store.hideOriginal = !settings.store.hideOriginal; }} />
                 </Menu.MenuGroup>
                 <Menu.MenuSeparator />
-                <Menu.MenuItem id="open-settings" label="Open full settings" action={() => {
+                <Menu.MenuItem id="open-settings" label="Abrir ajustes completos" action={() => {
                     setShow(false);
                     openPluginModal(plugins.AlwaysTranslate);
                 }} />
             </Menu.Menu>
         );
     };
+    // If Vencord's ContextMenuAPI patch did not register the menu components,
+    // fall back to opening the settings modal instead of rendering a broken menu.
+    const menuAvailable = !!(Menu as any).MenuItem && !!(Menu as any).MenuGroup;
+
+    if (!menuAvailable) {
+        return (
+            <HeaderBarIconNative
+                tooltip="AlwaysTranslate (abre ajustes)"
+                icon={ActiveIcon}
+                onClick={() => openPluginModal(plugins.AlwaysTranslate)}
+            />
+        );
+    }
+
     return (
         <Popout
             position="bottom"
@@ -173,48 +228,34 @@ export function TranslateHeaderButton() {
 }
 
 export const ManualBatchChatBarIcon: ChatBarButtonFactory = ({ isMainChat }) => {
-    const channelId = useStateFromStores([SelectedChannelStore], () => SelectedChannelStore.getChannelId());
-
-    const {
-        channelList = [],
-        translationEngine = "gemini",
-        translationMode = "global",
-        manualTranslationEngine = "gemini",
-        geminiApiKey,
-        deeplApiKey
-    } = settings.use(["channelList", "translationEngine", "translationMode", "manualTranslationEngine", "geminiApiKey", "deeplApiKey"]);
+    const { manualTranslationEngine = "google" } = settings.use(["manualTranslationEngine"]);
 
     if (!isMainChat || manualTranslationEngine === "disable") return null;
-
-    const channelConfig = channelList.find(c => c.id === channelId);
-    const isChannelListed = !!channelConfig;
-
-    const effectiveEngine = isChannelListed && channelConfig?.engine && channelConfig.engine !== "default"
-        ? channelConfig.engine
-        : translationEngine;
 
     const isGemini = manualTranslationEngine.startsWith("gemini");
     const isDeepSeek = manualTranslationEngine.startsWith("deepseek");
     const isDeepl = manualTranslationEngine === "deepl";
+    const isGoogle = manualTranslationEngine === "google";
 
-    const Icon = isDeepSeek ? DeepSeekIcon : (isGemini ? GeminiIcon : DeepLIcon);
-    const engineName = isDeepSeek ? "DeepSeek" : (isGemini ? "Gemini" : "DeepL");
+    const Icon = isGoogle ? TranslateIcon : isDeepSeek ? DeepSeekIcon : (isGemini ? GeminiIcon : DeepLIcon);
+    const engineName = isGoogle ? "Google Translate" : isDeepSeek ? "DeepSeek" : (isGemini ? "Gemini" : "DeepL");
 
     return (
         <ChatBarButton
             buttonProps={{ className: "bat-gemini-chatbar-wrapper" }}
-            tooltip="Translate Now"
+            tooltip="Traducir ahora"
             onClick={() => {
-                if (isGemini && !geminiApiKey) {
-                    showTranslationToast("Gemini API Key is required for Manual Translation. Please set it in AlwaysTranslate settings.");
+                const keys = getApiKeys();
+                if (isGemini && !keys.gemini) {
+                    showTranslationToast("Se necesita la clave de Gemini para la traducción manual. Configúrala en los ajustes de AlwaysTranslate.");
                     return;
                 }
-                if (isDeepSeek && !settings.store.deepseekApiKey) {
-                    showTranslationToast("DeepSeek API Key is required for Manual Translation. Please set it in AlwaysTranslate settings.");
+                if (isDeepSeek && !keys.deepseek) {
+                    showTranslationToast("Se necesita la clave de DeepSeek para la traducción manual. Configúrala en los ajustes de AlwaysTranslate.");
                     return;
                 }
-                if (isDeepl && !deeplApiKey) {
-                    showTranslationToast("DeepL API Key is required for Manual Translation. Please set it in AlwaysTranslate settings.");
+                if (isDeepl && !keys.deepl) {
+                    showTranslationToast("Se necesita la clave de DeepL para la traducción manual. Configúrala en los ajustes de AlwaysTranslate.");
                     return;
                 }
                 triggerManualBatch(isGemini || isDeepSeek);

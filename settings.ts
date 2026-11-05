@@ -13,10 +13,44 @@ import { GLOBAL_ENGINE_OPTIONS, LANGUAGES } from "./constants";
 
 export interface ChannelConfig {
     id: string;
-    lang: string;
+    /** Their language (source). "auto" = detect */
+    lang?: string;
     engine?: string;
     aiCustomPrompt?: string;
     outgoingCustomPrompt?: string;
+    /** New scope overrides. undefined = inherit from server/global */
+    enabled?: boolean;
+    /** My reading language in this channel. undefined = inherit */
+    targetLang?: string;
+    /** Language my outgoing messages are translated to. undefined = inherit */
+    outgoingLang?: string;
+    outgoing?: boolean;
+    /** Per scope glossary merged over the global dictionary */
+    glossary?: Record<string, string>;
+}
+
+/**
+ * A scope override. Every key is optional: undefined means "inherit from the next scope up".
+ * Precedence when resolving a message: user > channel > server > global.
+ */
+export interface ScopeConfig {
+    enabled?: boolean;
+    targetLang?: string;
+    sourceLang?: string;
+    /** Language outgoing messages are translated to. undefined = auto (source or detected) */
+    outgoingLang?: string;
+    engine?: string;
+    outgoing?: boolean;
+    aiPrompt?: string;
+    outgoingPrompt?: string;
+    glossary?: Record<string, string>;
+}
+
+export interface UserScopeConfig {
+    /** Overrides that apply when this user writes in DMs */
+    dm?: ScopeConfig;
+    /** Overrides that apply when this user writes in servers */
+    guild?: ScopeConfig;
 }
 
 export type GeminiQuotaKind = "rpm" | "tpm" | "rpd";
@@ -44,34 +78,34 @@ export const settings = definePluginSettings({
     targetLang: {
         type: OptionType.SELECT,
         default: "auto",
-        displayName: "My reading language",
-        description: "Language for received messages.",
-        options: LANGUAGES.map(l => l.value === "auto" ? { ...l, label: "Discord language", default: true } : l),
+        displayName: "Mi idioma de lectura",
+        description: "Idioma de los mensajes que recibes.",
+        options: LANGUAGES.map(l => l.value === "auto" ? { ...l, label: "Idioma de Discord", default: true } : l),
     },
 
     translationMode: {
         type: OptionType.SELECT,
-        default: "global",
-        displayName: "Automatic translation scope",
-        description: "Channels to translate automatically.",
+        default: "whitelist",
+        displayName: "Ámbito de traducción automática",
+        description: "Canales que se traducen automáticamente.",
         options: [
-            { label: "All channels", value: "global", default: true },
-            { label: "Selected channels only", value: "whitelist" }
+            { label: "Todos los canales", value: "global" },
+            { label: "Solo canales seleccionados", value: "whitelist", default: true }
         ],
     },
     translationEngine: {
         type: OptionType.SELECT,
-        default: "gemini",
-        displayName: "Default automatic engine",
-        description: "Default engine. Channel overrides apply separately.",
-        options: GLOBAL_ENGINE_OPTIONS.map(o => ({ ...o, label: o.value === "disable" ? "Off" : o.label, default: o.value === "gemini" })),
+        default: "google",
+        displayName: "Motor automático por defecto",
+        description: "Motor por defecto. Los overrides por canal se aplican aparte. Google no necesita clave.",
+        options: GLOBAL_ENGINE_OPTIONS.map(o => ({ ...o, label: o.value === "disable" ? "Desactivado" : o.label, default: o.value === "google" })),
     },
     manualTranslationEngine: {
         type: OptionType.SELECT,
-        default: "gemini",
-        displayName: "Manual button engine",
-        description: "Engine for the Translate Now button.",
-        options: GLOBAL_ENGINE_OPTIONS.map(o => ({ ...o, label: o.value === "disable" ? "Off" : o.label, default: o.value === "gemini" })),
+        default: "google",
+        displayName: "Motor del botón manual",
+        description: "Motor del botón «Traducir ahora». Google no necesita clave.",
+        options: GLOBAL_ENGINE_OPTIONS.map(o => ({ ...o, label: o.value === "disable" ? "Desactivado" : o.label, default: o.value === "google" })),
     },
     deeplApiKey: {
         type: OptionType.CUSTOM,
@@ -89,7 +123,7 @@ export const settings = definePluginSettings({
     },
     geminiModel: {
         type: OptionType.CUSTOM,
-        default: "gemini-3.1-flash-lite",
+        default: "gemini-2.5-flash-lite",
     },
     deepseekApiKey: {
         type: OptionType.CUSTOM,
@@ -128,6 +162,14 @@ export const settings = definePluginSettings({
         type: OptionType.CUSTOM,
         default: [] as ChannelConfig[],
     },
+    guildOverrides: {
+        type: OptionType.CUSTOM,
+        default: {} as Record<string, ScopeConfig>,
+    },
+    userOverrides: {
+        type: OptionType.CUSTOM,
+        default: {} as Record<string, UserScopeConfig>,
+    },
     channelManager: {
         type: OptionType.COMPONENT,
         // Assigned dynamically in index.tsx to avoid circular imports
@@ -136,27 +178,37 @@ export const settings = definePluginSettings({
     translateOutgoing: {
         type: OptionType.BOOLEAN,
         default: false,
-        displayName: "Translate outgoing messages",
-        description: "Translate before sending. Set a channel language first.",
+        displayName: "Traducir mensajes salientes",
+        description: "Traducir antes de enviar. El idioma de destino se elige en «Idioma de destino de mis mensajes».",
+    },
+    outgoingTargetLang: {
+        type: OptionType.SELECT,
+        default: "auto",
+        displayName: "Idioma de destino de mis mensajes",
+        description: "Idioma al que se traducen tus mensajes salientes. Auto usa el idioma del canal o el detectado.",
+        options: [
+            { label: "Auto (idioma del canal)", value: "auto", default: true },
+            ...LANGUAGES.filter(l => l.value !== "auto"),
+        ],
     },
     previewOutgoing: {
         type: OptionType.BOOLEAN,
         default: false,
-        displayName: "Preview before sending",
-        description: "Show translated text in chatbox before sending.",
+        displayName: "Previsualizar antes de enviar",
+        description: "Muestra el texto traducido en el chat antes de enviarlo.",
     },
     skipOwnMessages: {
         type: OptionType.BOOLEAN,
         default: true,
-        displayName: "Skip my incoming messages",
-        description: "Don't translate your own messages.",
+        displayName: "No traducir mis propios mensajes",
+        description: "No traducir tus mensajes.",
     },
 
     ignorePrefix: {
         type: OptionType.STRING,
         default: "!",
-        displayName: "Skip translation prefix",
-        description: "Skip messages starting with this.",
+        displayName: "Prefijo para no traducir",
+        description: "No traducir mensajes que empiecen por esto.",
     },
 
     header_dictionary: {
@@ -170,8 +222,8 @@ export const settings = definePluginSettings({
     dictionaryCaseSensitive: {
         type: OptionType.BOOLEAN,
         default: false,
-        displayName: "Case-sensitive dictionary (English)",
-        description: "Match uppercase/lowercase exactly.",
+        displayName: "Diccionario sensible a mayúsculas",
+        description: "Distinguir mayúsculas y minúsculas.",
     },
     dictionaryManager: {
         type: OptionType.COMPONENT,
@@ -186,26 +238,26 @@ export const settings = definePluginSettings({
     showSeparator: {
         type: OptionType.BOOLEAN,
         default: true,
-        displayName: "Show separator line",
-        description: "Show line above translations.",
+        displayName: "Mostrar línea separadora",
+        description: "Mostrar una línea encima de las traducciones.",
     },
     hideOriginal: {
         type: OptionType.BOOLEAN,
         default: false,
-        displayName: "Hide original message",
-        description: "Hide original text.",
+        displayName: "Ocultar mensaje original",
+        description: "Oculta el texto original.",
     },
     hideEmojis: {
         type: OptionType.BOOLEAN,
         default: false,
-        displayName: "Hide emojis",
-        description: "Completely remove emojis from translation.",
+        displayName: "Ocultar emojis",
+        description: "Eliminar los emojis de la traducción.",
     },
     hideMentions: {
         type: OptionType.BOOLEAN,
         default: false,
-        displayName: "Hide mentions",
-        description: "Completely remove @usernames from translation.",
+        displayName: "Ocultar menciones",
+        description: "Eliminar las @menciones de la traducción.",
     },
     translationColor: {
         type: OptionType.CUSTOM,
@@ -223,58 +275,99 @@ export const settings = definePluginSettings({
         type: OptionType.COMPONENT,
         component: (): ReactNode => null,
     },
+    debugLog: {
+        type: OptionType.BOOLEAN,
+        default: false,
+        displayName: "Registro de depuración",
+        description: "Escribe cada paso de la traducción en AlwaysTranslate.log. Las claves de API nunca se registran.",
+    },
+    ui_debugLog: {
+        type: OptionType.COMPONENT,
+        component: (): ReactNode => null,
+    },
 });
 
 // ─── Helper functions ───
+// Always read from `settings.plain` when building the next value: spreading a proxied
+// object copies proxy-wrapped children, which then fail Electron's IPC structured clone
+// when the settings are written to disk (and the write throws before listeners fire).
 
-/**
- * Get translation config for a specific channel.
- * Returns { allowed, config } where `allowed` means translation should run.
- */
-export function getChannelConfig(channelId: string): {
-    allowed: boolean;
-    config: ChannelConfig | null;
-} {
-    const channels = settings.store.channelList;
-    const config = channels.find(c => c.id === channelId);
-
-    if (settings.store.translationMode === "global") {
-        return { allowed: true, config: config ?? null };
-    } else {
-        return { allowed: !!config, config: config ?? null };
-    }
+export function getChannelEntry(channelId: string): ChannelConfig | undefined {
+    return settings.plain.channelList.find(c => c.id === channelId);
 }
 
-/**
- * Immutably update a single channel's properties.
- */
+/** Immutably update a single channel's properties. */
 export function updateChannel(
     channelId: string,
     updater: Partial<Omit<ChannelConfig, "id">>
 ) {
-    const channels = settings.store.channelList;
-    const channelIndex = channels.findIndex(ch => ch.id === channelId);
-    if (channelIndex !== -1) {
-        channels[channelIndex] = { ...channels[channelIndex], ...updater };
-    }
+    const { channelList } = settings.plain;
+    if (!channelList.some(c => c.id === channelId)) return;
+
+    settings.store.channelList = channelList.map(c => c.id === channelId ? { ...c, ...updater } : c);
 }
 
-/**
- * Immutably add a channel to the list.
- */
-export function addChannel(id: string, lang = "auto") {
-    const channels = settings.store.channelList;
-    if (channels.some(c => c.id === id)) return;
-    channels.push({ id, lang });
+/** Immutably add a channel to the list. */
+export function addChannel(id: string, lang = "auto", patch: Partial<Omit<ChannelConfig, "id" | "lang">> = {}) {
+    const { channelList } = settings.plain;
+    if (channelList.some(c => c.id === id)) return;
+
+    settings.store.channelList = [...channelList, { id, lang, ...patch }];
 }
 
-/**
- * Immutably remove a channel from the list.
- */
+/** Immutably remove a channel from the list. */
 export function removeChannel(id: string) {
-    const channels = settings.store.channelList;
-    const index = channels.findIndex(c => c.id === id);
-    if (index !== -1) {
-        channels.splice(index, 1);
+    settings.store.channelList = settings.plain.channelList.filter(c => c.id !== id);
+}
+
+export function getGuildScope(guildId: string): ScopeConfig | undefined {
+    return settings.plain.guildOverrides[guildId];
+}
+
+export function updateGuildScope(guildId: string, patch: Partial<ScopeConfig>) {
+    const current = settings.plain.guildOverrides[guildId] ?? {};
+    const next: ScopeConfig = { ...current, ...patch };
+
+    for (const key of Object.keys(next) as (keyof ScopeConfig)[]) {
+        if (next[key] === undefined) delete next[key];
     }
+
+    settings.store.guildOverrides = { ...settings.plain.guildOverrides, [guildId]: next };
+}
+
+export function clearGuildScope(guildId: string) {
+    const { [guildId]: _removed, ...rest } = settings.plain.guildOverrides;
+    settings.store.guildOverrides = rest;
+}
+
+export function getUserScope(userId: string, kind: "dm" | "guild"): ScopeConfig | undefined {
+    return settings.plain.userOverrides[userId]?.[kind];
+}
+
+export function updateUserScope(userId: string, kind: "dm" | "guild", patch: Partial<ScopeConfig>) {
+    const current = settings.plain.userOverrides[userId] ?? {};
+    const scope: ScopeConfig = { ...(current[kind] ?? {}), ...patch };
+
+    for (const key of Object.keys(scope) as (keyof ScopeConfig)[]) {
+        if (scope[key] === undefined) delete scope[key];
+    }
+
+    settings.store.userOverrides = {
+        ...settings.plain.userOverrides,
+        [userId]: { ...current, [kind]: scope },
+    };
+}
+
+export function clearUserScope(userId: string, kind: "dm" | "guild") {
+    const current = settings.plain.userOverrides[userId];
+    if (!current) return;
+
+    const scope = { ...current };
+    delete scope[kind];
+
+    const userOverrides = { ...settings.plain.userOverrides };
+    if (!scope.dm && !scope.guild) delete userOverrides[userId];
+    else userOverrides[userId] = scope;
+
+    settings.store.userOverrides = userOverrides;
 }

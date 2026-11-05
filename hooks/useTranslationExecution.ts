@@ -25,9 +25,12 @@ interface UseTranslationExecutionProps {
     deeplApiKey?: string;
     geminiApiKey?: string;
     deepseekApiKey?: string;
-    translationEngine: string;
     cachedTranslated: string | undefined;
     cacheRevision: number;
+    aiPrompt: string;
+    glossary: Record<string, string>;
+    /** Only start translating once the message is near the viewport */
+    enabled: boolean;
 }
 
 /**
@@ -48,9 +51,11 @@ export function useTranslationExecution({
     deeplApiKey,
     geminiApiKey,
     deepseekApiKey,
-    translationEngine,
     cachedTranslated,
-    cacheRevision
+    cacheRevision,
+    aiPrompt,
+    glossary,
+    enabled
 }: UseTranslationExecutionProps) {
     const [translatedText, setTranslatedText] = useState<string | null>(cachedTranslated ?? null);
     const [isTranslating, setIsTranslating] = useState(false);
@@ -66,14 +71,42 @@ export function useTranslationExecution({
     useEffect(() => {
         // If we already have the text from cache, we don't need to fetch
         if (cachedTranslated) {
+            Logger.debug("Execute", "cache hit", { messageId, chars: cachedTranslated.length });
             return;
         }
 
-        if (!content || (!allowed && !isManual) || skipMessage || !shouldTranslateContent || currentEngine === "disable") {
+        // Lazy loading: wait until the message is close to the viewport
+        if (!enabled) {
+            Logger.debug("Execute", "waiting for viewport", { messageId });
+            setIsTranslating(false);
+            return;
+        }
+
+        const skipReason = !content ? "empty content"
+            : (!allowed && !isManual) ? "scope disabled"
+                : skipMessage ? "own/optimistic/empty message"
+                    : !shouldTranslateContent ? "shouldTranslate=false (already target language or ignored)"
+                        : currentEngine === "disable" ? "engine disabled"
+                            : null;
+
+        if (skipReason) {
+            Logger.debug("Execute", "skipped", { messageId, reason: skipReason, engine: currentEngine, targetLang: resolvedTarget });
             setIsTranslating(false);
             setTranslatedText(null);
             return;
         }
+
+        Logger.debug("Execute", "evaluate", {
+            messageId,
+            channelId,
+            engine: currentEngine,
+            sourceLang,
+            targetLang: resolvedTarget,
+            manual: isManual,
+            allowed,
+            visible: enabled,
+            cacheKey,
+        });
 
         let cancelled = false;
         let timeoutId: NodeJS.Timeout;
@@ -86,7 +119,10 @@ export function useTranslationExecution({
             const cache = TranslationCache.getInstance();
             const generation = cache.getGeneration(cacheKey);
             let promise = TranslationCache.getInstance().getPending(cacheKey, content);
-            if (!promise) {
+            if (promise) {
+                Logger.debug("Execute", "reusing in-flight request", { messageId });
+            } else {
+                Logger.debug("Execute", "requesting translation", { messageId, chars: content.length, engine: currentEngine });
                 promise = safeTranslate(
                     content,
                     sourceLang,
@@ -95,7 +131,9 @@ export function useTranslationExecution({
                     { deepl: deeplApiKey || "", gemini: geminiApiKey || "", deepseek: deepseekApiKey || "" },
                     channelId,
                     messageId,
-                    isManual
+                    isManual,
+                    aiPrompt,
+                    glossary
                 );
                 TranslationCache.getInstance().setPending(cacheKey, content, promise);
             }
@@ -105,6 +143,7 @@ export function useTranslationExecution({
                 const result = await promise;
                 if (cache.getGeneration(cacheKey) !== generation) return;
                 if (result) cache.set(cacheKey, result, currentEngine);
+                Logger.debug("Execute", "result", { messageId, translated: !!result, chars: result?.length ?? 0 });
                 if (!cancelled) setTranslatedText(result);
             } catch (e) {
                 Logger.warn("Translate", "Translation request failed", e);
@@ -113,9 +152,12 @@ export function useTranslationExecution({
             }
         };
 
-        // Scroll debounce: skip API calls if user scrolls past message quickly (DeepL specific)
+        // Scroll debounce: skip API calls if user scrolls past message quickly
         if (currentEngine === "deepl") {
             timeoutId = setTimeout(run, 500);
+        } else if (currentEngine === "google") {
+            // Free endpoint, avoid bursting a whole channel at once
+            timeoutId = setTimeout(run, 200);
         } else {
             run();
         }
@@ -136,12 +178,12 @@ export function useTranslationExecution({
         deeplApiKey,
         geminiApiKey,
         deepseekApiKey,
-        translationEngine,
         skipMessage,
         shouldTranslateContent,
         cachedTranslated,
         channelId,
-        messageId
+        messageId,
+        enabled
     ]);
 
     return {

@@ -4,306 +4,233 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { Button, Forms, TextInput, useEffect, useState } from "@webpack/common";
+import { TextInput, useState } from "@webpack/common";
 
 import { translateWithDeepL } from "../api/deepl";
+import { translateBatchWithDeepSeek } from "../api/deepseek";
 import { translateBatchWithGemini } from "../api/gemini";
-import { nativeRequest } from "../api/nativeRequest";
 import { settings } from "../settings";
+import { getSecret, isSecretStorageAvailable, setSecret, useApiKeys } from "../utils/secrets";
+import { Button, Forms } from "./LegacyWebpack";
 
-function DeeplApiKeyInput({ setValue }: { setValue: (val: string) => void }) {
-    const { deeplApiKey } = settings.use(["deeplApiKey"]);
-    const [show, setShow] = useState(false);
-    const [validating, setValidating] = useState(false);
-    const [status, setStatus] = useState<"idle"|"success"|"error">("idle");
-    const [errorMsg, setErrorMsg] = useState("");
+type TestStatus = "idle" | "success" | "error";
 
-    const handleValidate = async () => {
-        if (!deeplApiKey) return;
-        setValidating(true);
-        setStatus("idle");
-        try {
-            // Send a test translation request
-            await translateWithDeepL(["test"], "auto", "en", deeplApiKey);
+const inputStyle = { flex: "1 1 220px", minWidth: 0 };
 
-            setStatus("success");
-            setErrorMsg("");
-        } catch (e: any) {
-            setStatus("error");
-            setErrorMsg(e.message || "Invalid API Key");
-        }
-        setValidating(false);
-    };
-
+function Field({ label, hint, children }: { label: string; hint?: string; children: any; }) {
     return (
-        <section style={{ marginBottom: "20px" }}>
-            <Forms.FormTitle>DeepL API Key</Forms.FormTitle>
-        <div style={{ marginTop: "8px" }}>
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
-                <div style={{ flex: "1 1 180px", minWidth: 0 }}>
-                    <TextInput
-                        type={show ? "text" : "password"}
-                        value={deeplApiKey}
-                        onChange={(val: string) => {
-                            settings.store.deeplApiKey = val;
-                            setValue(val);
-                            setStatus("idle");
-                        }}
-                        placeholder="Enter API Key..."
-                    />
-                </div>
-                <Button
-                    size={Button.Sizes.SMALL}
-                    color={Button.Colors?.PRIMARY ?? "primary"}
-                    look={Button.Looks?.FILLED ?? "filled"}
-                    onClick={() => setShow(!show)}
-                    style={{ height: "40px", minWidth: "80px", padding: "0 16px" }}
-                >
-                    {show ? "Hide" : "Show"}
-                </Button>
-                <Button
-                    size={Button.Sizes.SMALL}
-                    color={status === "success" ? Button.Colors?.GREEN ?? "green" : (status === "error" ? Button.Colors?.RED ?? "red" : Button.Colors?.BRAND ?? "brand")}
-                    look={Button.Looks?.FILLED ?? "filled"}
-                    onClick={handleValidate}
-                    disabled={validating || !deeplApiKey}
-                    style={{ height: "40px", minWidth: "80px", padding: "0 16px" }}
-                >
-                    {validating ? "Testing..." : (status === "success" ? "Valid!" : (status === "error" ? "Failed" : "Test Key"))}
-                </Button>
+        <div style={{ marginTop: 12 }}>
+            <div style={{ marginBottom: 4, fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase" }}>
+                {label}
             </div>
-            {status === "error" && (
-                <div style={{ marginTop: "8px", color: "var(--text-danger)" }}>
-                    {errorMsg}
-                </div>
-            )}
-            {status === "success" && (
-                <div style={{ marginTop: "8px", color: "var(--text-positive)" }}>
-                    Key verified.
-                </div>
-            )}
+            {children}
+            {hint && <Forms.FormText style={{ marginTop: 4 }}>{hint}</Forms.FormText>}
         </div>
+    );
+}
+
+function Provider({ title, configured, help, children }: {
+    title: string;
+    configured: boolean;
+    help?: string;
+    children?: any;
+}) {
+    return (
+        <section style={{ padding: "16px 0", borderBottom: "1px solid var(--background-modifier-accent)" }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <Forms.FormTitle style={{ margin: 0 }}>{title}</Forms.FormTitle>
+                <span style={{ fontSize: 12, fontWeight: 700, color: configured ? "var(--text-positive)" : "var(--text-muted)" }}>
+                    {configured ? "configurada" : "sin clave"}
+                </span>
+            </div>
+            {help && <Forms.FormText style={{ marginTop: 4 }}>{help}</Forms.FormText>}
+            {children}
         </section>
     );
 }
 
-function GeminiApiKeyInput({ setValue }: { setValue: (val: string) => void }) {
-    const { geminiApiKey, geminiModel } = settings.use(["geminiApiKey", "geminiModel"]);
+function ApiKeyRow({ value, placeholder, onChange, onTest }: {
+    value: string;
+    placeholder: string;
+    onChange(value: string): void;
+    onTest(): Promise<void>;
+}) {
     const [show, setShow] = useState(false);
     const [validating, setValidating] = useState(false);
-    const [status, setStatus] = useState<"idle"|"success"|"error">("idle");
-    const [errorMsg, setErrorMsg] = useState("");
+    const [status, setStatus] = useState<TestStatus>("idle");
+    const [error, setError] = useState("");
 
-    useEffect(() => setStatus("idle"), [geminiModel]);
-
-    const handleValidate = async () => {
-        if (!geminiApiKey) return;
+    async function test() {
         setValidating(true);
         setStatus("idle");
+        setError("");
+
         try {
-            await translateBatchWithGemini("0", [{ id: "0", text: "hello" }], "ko", geminiApiKey, "", geminiModel);
+            await onTest();
             setStatus("success");
-            setErrorMsg("");
         } catch (e: any) {
             setStatus("error");
-            setErrorMsg(e.message || "Invalid API Key");
+            setError(e?.detail ? `${e.message} — ${e.detail}` : (e?.message ?? String(e)));
+        } finally {
+            setValidating(false);
         }
-        setValidating(false);
-    };
+    }
 
     return (
-        <section style={{ marginBottom: "20px" }}>
-            <Forms.FormTitle>Gemini API Key</Forms.FormTitle>
-        <div style={{ marginTop: "8px" }}>
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
-                <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+        <div style={{ marginTop: 8 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+                <div style={inputStyle}>
                     <TextInput
                         type={show ? "text" : "password"}
-                        value={geminiApiKey}
-                        onChange={(val: string) => {
-                            settings.store.geminiApiKey = val;
-                            setValue(val);
+                        value={value}
+                        onChange={(v: string) => {
+                            onChange(v);
                             setStatus("idle");
                         }}
-                        placeholder="Enter API Key..."
+                        placeholder={placeholder}
                     />
                 </div>
-                <Button
-                    size={Button.Sizes.SMALL}
-                    color={Button.Colors?.PRIMARY ?? "primary"}
-                    look={Button.Looks?.FILLED ?? "filled"}
-                    onClick={() => setShow(!show)}
-                    style={{ height: "40px", minWidth: "80px", padding: "0 16px" }}
-                >
-                    {show ? "Hide" : "Show"}
+
+                <Button size={Button.Sizes.SMALL} color={Button.Colors.PRIMARY} onClick={() => setShow(s => !s)}>
+                    {show ? "Ocultar" : "Mostrar"}
                 </Button>
+
                 <Button
                     size={Button.Sizes.SMALL}
-                    color={status === "success" ? Button.Colors?.GREEN ?? "green" : (status === "error" ? Button.Colors?.RED ?? "red" : Button.Colors?.BRAND ?? "brand")}
-                    look={Button.Looks?.FILLED ?? "filled"}
-                    onClick={handleValidate}
-                    disabled={validating || !geminiApiKey}
-                    style={{ height: "40px", minWidth: "80px", padding: "0 16px" }}
+                    color={status === "success" ? Button.Colors.GREEN : status === "error" ? Button.Colors.RED : Button.Colors.PRIMARY}
+                    disabled={validating || !value.trim()}
+                    onClick={test}
                 >
-                    {validating ? "Testing..." : (status === "success" ? "Valid!" : (status === "error" ? "Failed" : "Test Key"))}
+                    {validating ? "Probando…" : status === "success" ? "Válida" : status === "error" ? "Falló" : "Probar clave"}
                 </Button>
             </div>
+
             {status === "error" && (
-                <div style={{ marginTop: "8px", color: "var(--text-danger)" }}>
-                    {errorMsg}
-                </div>
+                <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-danger)", wordBreak: "break-word" }}>{error}</div>
             )}
             {status === "success" && (
-                <div style={{ marginTop: "8px", color: "var(--text-positive)" }}>
-                    Key verified.
-                </div>
+                <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-positive)" }}>La clave funciona.</div>
             )}
-
-
         </div>
-        </section>
-    );
-}
-
-function DeepSeekApiKeyInput({ setValue }: { setValue: (val: string) => void }) {
-    const { deepseekApiKey, deepseekBaseUrl, deepseekModel } = settings.use(["deepseekApiKey", "deepseekBaseUrl", "deepseekModel"]);
-    const [show, setShow] = useState(false);
-    const [validating, setValidating] = useState(false);
-    const [status, setStatus] = useState<"idle"|"success"|"error">("idle");
-    const [errorMsg, setErrorMsg] = useState("");
-
-    useEffect(() => setStatus("idle"), [deepseekModel]);
-
-    const handleValidate = async () => {
-        if (!deepseekApiKey) return;
-        setValidating(true);
-        setStatus("idle");
-        try {
-            const Native = VencordNative.pluginHelpers.AlwaysTranslate as import("@utils/types").PluginNative<typeof import("../native")>;
-            const endpoint = deepseekBaseUrl || "https://api.deepseek.com/chat/completions";
-            const modelName = deepseekModel || "deepseek-v4-flash";
-
-            const res = await nativeRequest(id => Native.batDeepSeekFetch(endpoint, deepseekApiKey.trim(), JSON.stringify({
-                model: modelName,
-                messages: [{ role: "user", content: "hello" }],
-                stream: false
-            }), id));
-
-            if (!res.ok) {
-                let errorDetails = "Invalid API Key";
-                try {
-                    const parsed = JSON.parse(res.data);
-                    if (parsed.error?.message) {
-                        errorDetails = parsed.error.message;
-                    }
-                } catch (e) {}
-                throw new Error(errorDetails);
-            }
-
-            setStatus("success");
-            setErrorMsg("");
-        } catch (e: any) {
-            setStatus("error");
-            setErrorMsg(e.message || "Invalid API Key");
-        }
-        setValidating(false);
-    };
-
-    return (
-        <section style={{ marginBottom: "20px" }}>
-            <Forms.FormTitle>DeepSeek API Key</Forms.FormTitle>
-        <div style={{ marginTop: "8px" }}>
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
-                <div style={{ flex: "1 1 180px", minWidth: 0 }}>
-                    <TextInput
-                        type={show ? "text" : "password"}
-                        value={deepseekApiKey}
-                        onChange={(val: string) => {
-                            settings.store.deepseekApiKey = val;
-                            setValue(val);
-                            setStatus("idle");
-                        }}
-                        placeholder="Enter API Key..."
-                    />
-                </div>
-                <Button
-                    size={Button.Sizes.SMALL}
-                    color={Button.Colors?.PRIMARY ?? "primary"}
-                    look={Button.Looks?.FILLED ?? "filled"}
-                    onClick={() => setShow(!show)}
-                    style={{ height: "40px", minWidth: "80px", padding: "0 16px" }}
-                >
-                    {show ? "Hide" : "Show"}
-                </Button>
-                <Button
-                    size={Button.Sizes.SMALL}
-                    color={status === "success" ? Button.Colors?.GREEN ?? "green" : (status === "error" ? Button.Colors?.RED ?? "red" : Button.Colors?.BRAND ?? "brand")}
-                    look={Button.Looks?.FILLED ?? "filled"}
-                    onClick={handleValidate}
-                    disabled={validating || !deepseekApiKey}
-                    style={{ height: "40px", minWidth: "80px", padding: "0 16px" }}
-                >
-                    {validating ? "Testing..." : (status === "success" ? "Valid!" : (status === "error" ? "Failed" : "Test Key"))}
-                </Button>
-            </div>
-            {status === "error" && (
-                <div style={{ marginTop: "8px", color: "var(--text-danger)" }}>
-                    {errorMsg}
-                </div>
-            )}
-            {status === "success" && (
-                <div style={{ marginTop: "8px", color: "var(--text-positive)" }}>
-                    Key verified.
-                </div>
-            )}
-
-            <div style={{ marginTop: "16px", marginBottom: "4px", fontSize: "12px", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 700 }}>
-                Base URL
-            </div>
-            <TextInput
-                type="text"
-                value={deepseekBaseUrl}
-                onChange={(val: string) => {
-                    settings.store.deepseekBaseUrl = val;
-                    setStatus("idle");
-                }}
-                placeholder="https://api.deepseek.com/chat/completions"
-            />
-
-        </div>
-        </section>
     );
 }
 
 export function ApiKeysManager() {
-    const [expanded, setExpanded] = useState(false);
-    const { geminiModel, deepseekModel } = settings.use(["geminiModel", "deepseekModel"]);
-    const engines = [
-        { name: "Gemini", model: geminiModel, setModel: (value: string) => { settings.store.geminiModel = value; }, Input: GeminiApiKeyInput },
-        { name: "DeepSeek", model: deepseekModel, setModel: (value: string) => { settings.store.deepseekModel = value; }, Input: DeepSeekApiKeyInput },
-        { name: "DeepL", model: "", setModel: undefined, Input: DeeplApiKeyInput }
-    ];
+    const [expanded, setExpanded] = useState(true);
+    const keys = useApiKeys();
+    const secure = isSecretStorageAvailable();
+
+    const { geminiModel, deepseekModel, deepseekBaseUrl, translationEngine } = settings.use([
+        "geminiModel", "deepseekModel", "deepseekBaseUrl", "translationEngine",
+    ]);
+
+    const missingForEngine =
+        translationEngine === "gemini" && !keys.gemini ? "Gemini"
+            : translationEngine === "deepseek" && !keys.deepseek ? "DeepSeek"
+                : translationEngine === "deepl" && !keys.deepl ? "DeepL"
+                    : null;
 
     return (
         <section className="bat-settings-section" aria-label="API keys">
-            <Button size={Button.Sizes.SMALL} color={Button.Colors.PRIMARY} look={Button.Looks.FILLED}
-                aria-expanded={expanded} aria-controls="bat-api-keys"
-                onClick={() => setExpanded(value => !value)}>
-                {expanded ? "▾ API keys" : "▸ API keys"}
+            <Forms.FormText style={{ marginBottom: 8 }}>
+                Google Translate needs no key. Las claves se cifran con el llavero del sistema (DPAPI en Windows) y nunca se escriben en settings.json.
+                {!secure && " El cifrado aún no está disponible: reinicia Discord una vez para cargar el código nativo nuevo."}
+            </Forms.FormText>
+
+            {missingForEngine && (
+                <Forms.FormText style={{ marginBottom: 8, color: "var(--text-danger)" }}>
+                    Tu motor automático es {missingForEngine}, pero su clave de API está vacía.
+                </Forms.FormText>
+            )}
+
+            <Button size={Button.Sizes.SMALL} color={Button.Colors.PRIMARY} onClick={() => setExpanded(v => !v)}>
+                {expanded ? "Ocultar claves de API" : "Mostrar claves de API"}
             </Button>
-            <div id="bat-api-keys" hidden={!expanded}>
-                {engines.map(({ name, model, setModel, Input }) => (
-                    <section key={name} style={{ padding: "16px 0", borderBottom: "1px solid var(--background-modifier-accent)" }}>
-                        <Input setValue={() => {}} />
-                        {setModel && (
-                            <div>
-                                <Forms.FormTitle>Model</Forms.FormTitle>
-                                <TextInput value={model} onChange={setModel} placeholder="Model ID" />
-                            </div>
-                        )}
-                    </section>
-                ))}
-            </div>
+
+            {expanded && (
+                <div>
+                    <Provider
+                        title="Google Translate"
+                        configured
+                        help="Endpoint gratuito, sin cuenta. Es el motor por defecto."
+                    />
+
+                    <Provider
+                        title="Gemini"
+                        configured={!!keys.gemini}
+                        help="Consigue una clave en aistudio.google.com/apikey. El modelo debe soportar generateContent."
+                    >
+                        <ApiKeyRow
+                            value={keys.gemini}
+                            placeholder="AIza..."
+                            onChange={v => setSecret("gemini", v)}
+                            onTest={async () => {
+                                await translateBatchWithGemini("0", [{ id: "0", text: "hello" }], "es", getSecret("gemini"), "", geminiModel);
+                            }}
+                        />
+                        <Field label="Modelo" hint="Ejemplos: gemini-2.5-flash-lite, gemini-2.5-flash, gemini-2.5-pro. Prueba la clave tras cambiarlo.">
+                            <TextInput
+                                value={geminiModel}
+                                onChange={(v: string) => { settings.store.geminiModel = v.trim(); }}
+                                placeholder="gemini-2.5-flash-lite"
+                            />
+                        </Field>
+                    </Provider>
+
+                    <Provider
+                        title="DeepSeek"
+                        configured={!!keys.deepseek}
+                        help="Consigue una clave en platform.deepseek.com/api_keys."
+                    >
+                        <ApiKeyRow
+                            value={keys.deepseek}
+                            placeholder="sk-..."
+                            onChange={v => setSecret("deepseek", v)}
+                            onTest={async () => {
+                                await translateBatchWithDeepSeek(
+                                    "0",
+                                    [{ id: "0", text: "hello" }],
+                                    "es",
+                                    getSecret("deepseek"),
+                                    "",
+                                    deepseekModel,
+                                    undefined,
+                                    deepseekBaseUrl
+                                );
+                            }}
+                        />
+                        <Field label="Modelo">
+                            <TextInput
+                                value={deepseekModel}
+                                onChange={(v: string) => { settings.store.deepseekModel = v.trim(); }}
+                                placeholder="deepseek-chat"
+                            />
+                        </Field>
+                        <Field label="URL base" hint="Cámbiala solo si usas un proxy compatible.">
+                            <TextInput
+                                value={deepseekBaseUrl}
+                                onChange={(v: string) => { settings.store.deepseekBaseUrl = v.trim(); }}
+                                placeholder="https://api.deepseek.com/chat/completions"
+                            />
+                        </Field>
+                    </Provider>
+
+                    <Provider
+                        title="DeepL"
+                        configured={!!keys.deepl}
+                        help="Consigue una clave en deepl.com/pro-api. Las gratuitas terminan en :fx."
+                    >
+                        <ApiKeyRow
+                            value={keys.deepl}
+                            placeholder="xxxxxxxx-xxxx-...:fx"
+                            onChange={v => setSecret("deepl", v)}
+                            onTest={async () => {
+                                await translateWithDeepL(["test"], "auto", "en", getSecret("deepl"));
+                            }}
+                        />
+                    </Provider>
+                </div>
+            )}
         </section>
     );
 }

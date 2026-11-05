@@ -5,9 +5,10 @@
  */
 
 import { Divider } from "@components/Divider";
-import { Button, Forms, TextInput,useState } from "@webpack/common";
+import { TextInput, useState } from "@webpack/common";
 
 import { useDictionary } from "../dict";
+import { Button, Forms } from "./LegacyWebpack";
 
 export function DictionaryManager() {
     const [original, setOriginal] = useState("");
@@ -29,9 +30,9 @@ export function DictionaryManager() {
 
     return (
         <section style={{ marginTop: 16 }}>
-            <Forms.FormTitle>Custom Dictionary ({dictionaryEntries.length})</Forms.FormTitle>
+            <Forms.FormTitle>Diccionario personalizado ({dictionaryEntries.length})</Forms.FormTitle>
             <Forms.FormText>
-                Preferred translations for words and names.
+                Traducciones preferidas para palabras y nombres.
             </Forms.FormText>
 
             <Divider style={{ marginTop: "16px", marginBottom: "16px" }} />
@@ -40,7 +41,7 @@ export function DictionaryManager() {
                 <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", marginBottom: "16px" }}>
                     <div style={{ flex: "1 1 150px" }}>
                         <TextInput
-                            placeholder="Original word (e.g. ナイト)"
+                            placeholder="Palabra original (p. ej. ナイト)"
                             value={original}
                             onChange={setOriginal}
                         />
@@ -48,7 +49,7 @@ export function DictionaryManager() {
                     <div style={{ flex: "0 0 auto", color: "var(--text-muted)" }}>→</div>
                     <div style={{ flex: "1 1 150px" }}>
                         <TextInput
-                            placeholder="Translation (e.g. Knight)"
+                            placeholder="Traducción (p. ej. Knight)"
                             value={translated}
                             onChange={setTranslated}
                         />
@@ -58,13 +59,13 @@ export function DictionaryManager() {
                         disabled={!original.trim() || !translated.trim()}
                         color={Button.Colors.GREEN}
                     >
-                        Add
+                        Añadir
                     </Button>
                 </div>
 
                 {dictionaryEntries.length === 0 ? (
                     <Forms.FormText>
-                        Your custom dictionary is empty.
+                        Tu diccionario personalizado está vacío.
                     </Forms.FormText>
                 ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "300px", overflowY: "auto", paddingRight: "8px" }}>
@@ -76,7 +77,7 @@ export function DictionaryManager() {
                                         setOriginal(orig);
                                         setTranslated(trans);
                                     }}
-                                    title="Click to edit"
+                                    title="Clic para editar"
                                 >
                                     <span style={{ fontWeight: 600, color: "var(--header-primary)" }}>{orig}</span>
                                     <span style={{ color: "var(--text-muted)", fontSize: "12px" }}>→</span>
@@ -88,7 +89,7 @@ export function DictionaryManager() {
                                     size={Button.Sizes.SMALL}
                                     look={Button.Looks.FILLED}
                                 >
-                                    Remove
+                                    Quitar
                                 </Button>
                             </div>
                         ))}

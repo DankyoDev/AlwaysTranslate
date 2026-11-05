@@ -24,7 +24,7 @@ export function GithubLinkInjector() {
             a.href = "https://github.com/komi-juru/AlwaysTranslate";
             a.target = "_blank";
             a.rel = "noreferrer";
-            a.title = "View source code";
+            a.title = "Ver código fuente";
             a.style.display = "inline-flex";
             a.style.alignItems = "center";
             a.style.justifyContent = "center";

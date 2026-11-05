@@ -4,20 +4,21 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { Button, Forms, useState } from "@webpack/common";
+import { useState } from "@webpack/common";
 
-import { showTranslationToast } from "../utils/toast";
 import { settings } from "../settings";
 import { TranslationCache } from "../utils/cache";
+import { showTranslationToast } from "../utils/toast";
+import { Button, Forms } from "./LegacyWebpack";
 
 export function ClearCacheButton() {
     const [count, setCount] = useState(() => TranslationCache.getInstance().getTotalCount());
 
     return (
         <section style={{ marginBottom: "20px" }}>
-            <Forms.FormTitle>Clear Cache</Forms.FormTitle>
+            <Forms.FormTitle>Limpiar caché</Forms.FormTitle>
             <Forms.FormText style={{ marginBottom: "8px" }}>
-                Clears all saved translation data from memory and storage.
+                Borra todos los datos de traducción guardados en memoria y disco.
             </Forms.FormText>
             <Button
                 color={Button.Colors.RED}
@@ -27,10 +28,10 @@ export function ClearCacheButton() {
                     settings.store.geminiQuotaLocks = {};
                     settings.store._cacheVersion = (settings.store._cacheVersion || 0) + 1;
                     setCount(0);
-                    showTranslationToast("All translation caches have been cleared.", "success");
+                    showTranslationToast("Se han borrado todas las cachés de traducción.", "success");
                 }}
             >
-                Clear All Caches ({count})
+                Borrar todas las cachés ({count})
             </Button>
         </section>
     );

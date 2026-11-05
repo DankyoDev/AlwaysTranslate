@@ -8,8 +8,7 @@ let cachedDictRegex: RegExp | null = null;
 let cachedDictKeysStr: string = "";
 let cachedCaseSensitive: boolean | null = null;
 
-export function getDictRegex(dictKeys: string[], caseSensitive: boolean): RegExp | null {
-    if (dictKeys.length === 0) return null;
+export function getDictRegex(dictKeys: string[], caseSensitive: boolean): RegExp | null { if (dictKeys.length === 0) return null;
 
     const keysStr = dictKeys.join("|||");
     if (cachedDictKeysStr === keysStr && cachedCaseSensitive === caseSensitive) {
@@ -50,4 +49,27 @@ export function getDictRegex(dictKeys: string[], caseSensitive: boolean): RegExp
     cachedDictKeysStr = keysStr;
     cachedCaseSensitive = caseSensitive;
     return cachedDictRegex;
+}
+
+/**
+ * Strips LLM writing artifacts: em/en dashes, curly quotes, ellipses and
+ * non-breaking/zero-width characters that the source text did not contain.
+ */
+export function sanitizeTranslation(text: string, source: string): string {
+    let out = text;
+
+    if (!/[\u2014\u2013]/.test(source)) {
+        out = out
+            .replace(/\s*[\u2014\u2013]\s*/g, ", ")
+            .replace(/,\s*,/g, ",");
+    }
+
+    if (!/[\u201C\u201D]/.test(source)) out = out.replace(/[\u201C\u201D]/g, "\"");
+    if (!/[\u2018\u2019]/.test(source)) out = out.replace(/[\u2018\u2019]/g, "'");
+    if (!/\u2026/.test(source)) out = out.replace(/\u2026/g, "...");
+
+    return out
+        .replace(/\u00A0/g, " ")
+        .replace(/[\u200B-\u200D\uFEFF]/g, "")
+        .replace(/[ \t]+$/gm, "");
 }

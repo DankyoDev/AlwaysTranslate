@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { CustomDictionaryStore } from "../dict";
-import { getChannelConfig, settings } from "../settings";
+import { settings } from "../settings";
 
 export function getCacheKey(
     channelId: string,
@@ -13,17 +12,17 @@ export function getCacheKey(
     engine: string,
     sourceLang: string,
     targetLang: string,
-    sourceText: string
+    sourceText: string,
+    prompt = "",
+    glossarySignature = ""
 ): string {
-    const config = channelId ? getChannelConfig(channelId).config : null;
     const model = engine.startsWith("gemini") ? settings.store.geminiModel
         : engine.startsWith("deepseek") ? settings.store.deepseekModel : "";
     const endpoint = engine.startsWith("deepseek") ? settings.store.deepseekBaseUrl : "";
     // Versioned, channel-scoped keys: no cross-engine or cross-prompt reuse.
     // Exact source text avoids hash collisions returning another message's translation.
     return getChannelCachePrefix(channelId) + JSON.stringify([
-        engine, model, endpoint, sourceLang, targetLang, config?.aiCustomPrompt || "",
-        CustomDictionaryStore.getInstance().getCacheSignature(),
+        engine, model, endpoint, sourceLang, targetLang, prompt, glossarySignature,
         settings.store.dictionaryCaseSensitive, settings.store.hideEmojis,
         settings.store.hideMentions, sourceText
     ]);

@@ -50,6 +50,7 @@ export interface TranslationTask {
     dictMatches?: Record<string, string>;
     model?: string;
     endpoint?: string;
+    context?: string;
 }
 
 export class Mutex {
@@ -99,6 +100,16 @@ export class GeminiChannelWorker {
         });
         task.status = "QUEUED";
         this.registry.set(task.id, task);
+
+        Logger.debug("Worker", "enqueued", {
+            engine: task.engine,
+            messageId: task.messageId || "(outgoing)",
+            chars: task.text.length,
+            queued: this.getQueuedCount(),
+            threshold: settings.store.APIEcoModeThreshold,
+            maxWait: settings.store.APIMaxBatchWait,
+        });
+
         this.schedule();
     }
 
@@ -292,37 +303,68 @@ export class GeminiChannelWorker {
                             combinedDmPrompt += glossaryStr;
                         }
 
-                        let fetchPromise;
-                        if (engine.startsWith("deepseek")) {
-                            fetchPromise = translateBatchWithDeepSeek(
+                        const chunkContext = chunk.find(t => t.context)?.context;
+                        const callApi = (messages: { id: string, text: string; }[]) => engine.startsWith("deepseek")
+                            ? translateBatchWithDeepSeek(
                                 this.channelId,
-                                messagesToTranslate,
+                                messages,
                                 targetLang,
                                 apiKey,
                                 combinedDmPrompt,
                                 model,
-                                this.abortController.signal,
-                                endpoint
-                            );
-                        } else {
-                            fetchPromise = translateBatchWithGemini(
+                                this.abortController!.signal,
+                                endpoint,
+                                chunkContext
+                            )
+                            : translateBatchWithGemini(
                                 this.channelId,
-                                messagesToTranslate,
+                                messages,
                                 targetLang,
                                 apiKey,
                                 combinedDmPrompt,
                                 model,
-                                this.abortController.signal
+                                this.abortController!.signal,
+                                chunkContext
                             );
-                        }
+
+                        Logger.debug("Worker", "batch sending", {
+                            channelId: this.channelId,
+                            engine,
+                            model,
+                            messages: messagesToTranslate.length,
+                            ids: messagesToTranslate.map(m => m.id),
+                            contextLines: chunkContext ? chunkContext.split("\n").length : 0,
+                            glossary: Object.keys(chunkGlossary).length,
+                        });
+
+                        const fetchPromise = callApi(messagesToTranslate);
 
                         const timeoutPromise = new Promise<any>((_, reject) => {
                             this.abortController?.signal.addEventListener("abort", () => reject(new Error("Translation timed out (20s)")));
                         });
 
-                        const results = await Promise.race([fetchPromise, timeoutPromise]);
+                        let results: { id: string; text: string; }[] = await Promise.race([fetchPromise, timeoutPromise]);
                         if (generation !== this.generation) return;
                         clearTimeout(timeoutId);
+
+                        Logger.debug("Worker", "batch result", { engine, messages: results.length });
+
+                        // Some models silently skip messages. Retry only the missing ones once.
+                        const returned = new Set(results.map(r => r.id));
+                        const missing = messagesToTranslate.filter(m => !returned.has(m.id));
+                        if (missing.length && missing.length < messagesToTranslate.length) {
+                            Logger.warn("Worker", "model omitted messages, retrying", {
+                                engine,
+                                missing: missing.map(m => m.id),
+                            });
+
+                            try {
+                                const retryResults = await callApi(missing);
+                                results = results.concat(retryResults);
+                            } catch (e) {
+                                Logger.warn("Worker", "retry for omitted messages failed", e);
+                            }
+                        }
 
                         const resultMap = new Map<string, string>(results.map((r: { id: string; text: string }) => [r.id, r.text]));
                         chunk.forEach(t => {
@@ -469,6 +511,16 @@ export class DeeplChannelWorker {
         });
         task.status = "QUEUED";
         this.registry.set(task.id, task);
+
+        Logger.debug("Worker", "enqueued", {
+            engine: task.engine,
+            messageId: task.messageId || "(outgoing)",
+            chars: task.text.length,
+            queued: this.getQueuedCount(),
+            threshold: settings.store.APIEcoModeThreshold,
+            maxWait: settings.store.APIMaxBatchWait,
+        });
+
         this.schedule();
     }
 

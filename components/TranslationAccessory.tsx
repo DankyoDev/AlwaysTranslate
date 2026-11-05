@@ -8,34 +8,28 @@ import { Message } from "@vencord/discord-types";
 import { findCssClassesLazy } from "@webpack";
 import { Parser, useEffect,UserStore, useState } from "@webpack/common";
 
+import { useIsMessageVisible } from "../hooks/useIsMessageVisible";
 import { useManualTranslation } from "../hooks/useManualTranslation";
 import { useMessageVisibility } from "../hooks/useMessageVisibility";
 import { useTranslationExecution } from "../hooks/useTranslationExecution";
 import { pluginStarted } from "../index";
-import { getChannelConfig, settings } from "../settings";
+import { settings } from "../settings";
 import { TranslationCache } from "../utils/cache";
 import { getCacheKey } from "../utils/hash";
 import { shouldTranslate } from "../utils/message";
+import { getGuildIdForChannel, resolveConfig } from "../utils/scopes";
+import { useApiKeys } from "../utils/secrets";
 import { LoadingIndicator } from "./LoadingIndicator";
 
 const CodeContainerClasses = findCssClassesLazy("markup");
 
 export function TranslationAccessory({ message }: { message: Message }) {
-    if (!pluginStarted) return null;
-
     const {
         hideOriginal,
         showSeparator,
         translationColor,
-        translationEngine = "gemini",
-        targetLang = "auto",
-        deeplApiKey,
-        geminiApiKey,
-        deepseekApiKey,
         skipOwnMessages,
-        channelList,
-        translationMode,
-        manualTranslationEngine = "gemini",
+        manualTranslationEngine = "google",
         hideEmojis,
         _cacheVersion
     } = settings.use([
@@ -44,11 +38,10 @@ export function TranslationAccessory({ message }: { message: Message }) {
         "translationColor",
         "translationEngine",
         "targetLang",
-        "deeplApiKey",
-        "geminiApiKey",
-        "deepseekApiKey",
         "skipOwnMessages",
         "channelList",
+        "guildOverrides",
+        "userOverrides",
         "translationMode",
         "manualTranslationEngine",
         "hideEmojis",
@@ -56,20 +49,29 @@ export function TranslationAccessory({ message }: { message: Message }) {
         "deepseekModel",
         "deepseekBaseUrl",
         "dictionaryCaseSensitive",
+        "customDictionary",
         "hideMentions",
         "_cacheVersion"
     ]);
 
-    const { allowed, config } = getChannelConfig(message.channel_id);
+    const apiKeys = useApiKeys();
+    const isVisible = useIsMessageVisible(message.id);
 
-    const sourceLang = config?.lang ?? "auto";
-    let resolvedTarget: string = targetLang;
+    const resolved = resolveConfig({
+        channelId: message.channel_id,
+        guildId: (message as any).guild_id ?? getGuildIdForChannel(message.channel_id),
+        userId: message.author?.id
+    });
+
+    const { sourceLang } = resolved;
+    let resolvedTarget: string = resolved.targetLang;
     if (resolvedTarget === "auto") {
         resolvedTarget = document.documentElement.lang.split("-")[0] || "en";
     }
+    const allowed = resolved.enabled;
 
     const activeManualEngine = manualTranslationEngine === "disable"
-        ? "gemini"
+        ? "google"
         : manualTranslationEngine;
 
     // Quick skip checks for own messages and optimistic messages
@@ -78,14 +80,13 @@ export function TranslationAccessory({ message }: { message: Message }) {
     const skipMessage = isOwnMessage || isOptimistic || !message.content;
     const shouldTranslateContent = !skipMessage && shouldTranslate(message.content, resolvedTarget);
 
-    let autoEngine = config?.engine ?? translationEngine;
-    if (autoEngine === "default") autoEngine = translationEngine;
+    const autoEngine = resolved.engine;
 
     // Cache keys are engine-specific:
     // - Gemini uses persistent cache
     // - DeepL uses volatile cache
-    const autoCacheKey = getCacheKey(message.channel_id, message.id, autoEngine, sourceLang, resolvedTarget, message.content);
-    const manualCacheKey = getCacheKey(message.channel_id, message.id, activeManualEngine, sourceLang, resolvedTarget, message.content);
+    const autoCacheKey = getCacheKey(message.channel_id, message.id, autoEngine, sourceLang, resolvedTarget, message.content, resolved.aiPrompt, resolved.glossarySignature);
+    const manualCacheKey = getCacheKey(message.channel_id, message.id, activeManualEngine, sourceLang, resolvedTarget, message.content, resolved.aiPrompt, resolved.glossarySignature);
 
     // Manual Translation Hook
     const { isManual } = useManualTranslation({
@@ -160,12 +161,14 @@ export function TranslationAccessory({ message }: { message: Message }) {
         allowed,
         isManual,
         skipMessage,
-        deeplApiKey,
-        geminiApiKey,
-        deepseekApiKey,
-        translationEngine,
+        deeplApiKey: apiKeys.deepl,
+        geminiApiKey: apiKeys.gemini,
+        deepseekApiKey: apiKeys.deepseek,
+        aiPrompt: resolved.aiPrompt,
+        glossary: resolved.glossary,
         cachedTranslated,
-        cacheRevision: _cacheVersion
+        cacheRevision: _cacheVersion,
+        enabled: isVisible && pluginStarted
     });
 
     // Visibility Hook (DOM side-effects)
@@ -178,6 +181,7 @@ export function TranslationAccessory({ message }: { message: Message }) {
     });
 
     // If channel is disabled or no translation yet, render nothing
+    if (!pluginStarted) return null;
     if (activeEngine === "disable") return null;
     if (!allowed && !isManual) return null;
     if (!translatedText && !isTranslating) return null;

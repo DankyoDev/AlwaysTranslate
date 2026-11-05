@@ -4,11 +4,14 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { CustomDictionaryStore } from "../dict";
-import { getChannelConfig, settings } from "../settings";
+import { settings } from "../settings";
+import { noteDetectedLanguage } from "../utils/detectedLanguage";
+import { Logger, preview } from "../utils/logger";
 import { shouldTranslate } from "../utils/message";
-import { getDictRegex } from "../utils/string";
-import { getGeminiActiveQuotaLock, showGeminiQuotaToast } from "./breaker";
+import { getDictRegex, sanitizeTranslation } from "../utils/string";
+import { getGeminiActiveQuotaLock, showApiToast, showGeminiQuotaToast } from "./breaker";
+import { buildContextText } from "./context";
+import { googleTranslate, isSameLanguage } from "./google";
 import { DeeplChannelWorker, deeplWorkers, GeminiChannelWorker, geminiWorkers, reScheduleAllWorkers,resetAllWorkers } from "./worker";
 
 export { reScheduleAllWorkers };
@@ -30,7 +33,8 @@ export async function translate(
     apiKeys: { deepl: string, gemini: string, deepseek: string },
     isManual = false,
     dictMatches: Record<string, string> = {},
-    customPrompt?: string
+    customPrompt?: string,
+    context?: string
 ): Promise<string> {
     if (engine?.startsWith("gemini") || engine?.startsWith("deepseek")) {
         const isDeepSeek = engine.startsWith("deepseek");
@@ -45,8 +49,7 @@ export async function translate(
         }
 
         const result = await new Promise<string>(resolve => {
-            const { config } = getChannelConfig(channelId);
-            const dmPrompt = customPrompt ?? config?.aiCustomPrompt ?? "";
+            const dmPrompt = customPrompt ?? "";
 
             if (!geminiWorkers.has(channelId)) {
                 geminiWorkers.set(channelId, new GeminiChannelWorker(channelId));
@@ -55,9 +58,16 @@ export async function translate(
             const worker = geminiWorkers.get(channelId)!;
             const taskId = crypto.randomUUID();
             worker.enqueue({
-                id: taskId, messageId, channelId, text, resolve, targetLang, apiKey: engineKey, engine, dmPrompt, isManual, dictMatches,
+                id: taskId, messageId, channelId, text, resolve, targetLang, apiKey: engineKey, engine, dmPrompt, isManual, dictMatches, context,
                 model: isDeepSeek ? settings.store.deepseekModel : settings.store.geminiModel,
                 endpoint: isDeepSeek ? settings.store.deepseekBaseUrl : undefined
+            });
+            Logger.debug("Translate", "queued AI task", {
+                taskId, channelId, engine, targetLang,
+                chars: text.length,
+                contextLines: context ? context.split("\n").length : 0,
+                prompt: dmPrompt ? preview(dmPrompt, 80) : "(none)",
+                queued: worker.getQueuedCount?.() ?? "?",
             });
             if (!messageId) {
                 worker.flushNow();
@@ -76,8 +86,60 @@ export async function translate(
         return "";
     }
 
+    // Google Translate: free endpoint, no key, one request per message
+    if (engine === "google") {
+        const attempt = async () => {
+            Logger.debug("Google", "request", { sourceLang, targetLang, chars: text.length });
+
+            const result = await googleTranslate(text, sourceLang, targetLang);
+
+            Logger.debug("Google", "response", {
+                sourceLanguage: result.sourceLanguage || "(unknown)",
+                chars: result.text.length,
+                preview: preview(result.text),
+            });
+
+            return result;
+        };
+
+        try {
+            let result;
+
+            try {
+                result = await attempt();
+            } catch (e) {
+                const message = e instanceof Error ? e.message : String(e);
+                if (message.toLowerCase().includes("rate limit")) throw e;
+
+                Logger.warn("Google", "request failed, retrying once", e);
+                await new Promise(resolve => setTimeout(resolve, 500));
+                result = await attempt();
+            }
+
+            // Already in the language I read: nothing to show
+            if (result.sourceLanguage && isSameLanguage(result.sourceLanguage, targetLang)) {
+                Logger.debug("Google", "skipped: already in target language", { sourceLanguage: result.sourceLanguage, targetLang });
+                return "";
+            }
+
+            if (channelId) noteDetectedLanguage(channelId, result.sourceLanguage);
+
+            return result.text;
+        } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            if (message.toLowerCase().includes("rate limit")) {
+                Logger.warn("Google", "rate limit reached, cooling down", message);
+                showApiToast("google", "límite de peticiones alcanzado, reintentando en un minuto", 60_000);
+            } else {
+                Logger.warn("Google", "request failed", e);
+            }
+            return "";
+        }
+    }
+
     // DeepL uses Batching
     if (engine === "deepl") {
+        Logger.debug("DeepL", "queueing task", { channelId, chars: text.length, targetLang });
         const result = await new Promise<string>(resolve => {
             const key = `deepl|||${sourceLang}|||${targetLang}|||${apiKeys.deepl}`;
             if (!deeplWorkers.has(key)) {
@@ -182,8 +244,7 @@ function restoreTokens(text: string, tokens: string[]): string {
 let cachedDictHash = "";
 let cachedDictRegex: RegExp | null = null;
 
-function applyCustomDictionary(text: string, caseSensitive: boolean): { replacedText: string, matches: Record<string, string> } {
-    const dict = CustomDictionaryStore.getInstance().getDict();
+function applyCustomDictionary(text: string, caseSensitive: boolean, dict: Record<string, string>): { replacedText: string, matches: Record<string, string> } {
     const dictKeys = Object.keys(dict);
     const matches: Record<string, string> = {};
 
@@ -221,16 +282,35 @@ export async function safeTranslate(
     channelId?: string,
     messageId?: string,
     isManual = false,
-    customPrompt?: string
+    customPrompt?: string,
+    glossary: Record<string, string> = {},
+    isOutgoing = false
 ): Promise<string | null> {
-    if (!shouldTranslate(content, targetLang)) return null;
+    if (!isOutgoing && !shouldTranslate(content, targetLang)) {
+        Logger.debug("Translate", "skipped by language heuristic", { targetLang, chars: content.length, preview: preview(content) });
+        return null;
+    }
 
     // 1. Tokenize (Extract mentions, code blocks, emojis)
     let { textToTranslate, tokens } = tokenizeText(content.trim(), settings.store.hideEmojis, settings.store.hideMentions);
 
     // 2. Custom Dictionary Substitution
     const isAI = engine?.startsWith("gemini") || engine?.startsWith("deepseek");
-    const { replacedText, matches } = applyCustomDictionary(textToTranslate, settings.store.dictionaryCaseSensitive);
+    const { replacedText, matches } = applyCustomDictionary(textToTranslate, settings.store.dictionaryCaseSensitive, glossary);
+
+    Logger.debug("Translate", "prepared", {
+        messageId: messageId || "(outgoing)",
+        channelId: channelId || "(none)",
+        engine,
+        sourceLang,
+        targetLang,
+        chars: content.length,
+        tokens: tokens.length,
+        dictionaryMatches: Object.keys(matches).length,
+        manual: isManual,
+        prompt: customPrompt ? preview(customPrompt) : "(none)",
+        glossaryTerms: Object.keys(glossary).length,
+    });
 
     // For AI, we keep original text and pass dictionary rules to prompt.
     // For DeepL, we inline replace the text.
@@ -247,11 +327,31 @@ export async function safeTranslate(
         apiKeys,
         isManual,
         matches,
-        customPrompt
+        customPrompt,
+        isAI ? buildContextText(channelId || "", messageId || undefined) : undefined
     );
 
-    if (!result || result === textToTranslate) return null;
+    if (!result) {
+        Logger.debug("Translate", "no result (skipped, same language or failed)", { messageId, engine });
+        return null;
+    }
 
-    // 4. Restore tokens
-    return restoreTokens(result, tokens);
+    if (result === textToTranslate) {
+        Logger.debug("Translate", "unchanged output, nothing to show", { messageId, engine });
+        return null;
+    }
+
+    // 4. Remove LLM artifacts, then restore tokens
+    const sanitized = sanitizeTranslation(result, content);
+    if (sanitized !== result) {
+        Logger.debug("Translate", "sanitized LLM punctuation", {
+            before: preview(result),
+            after: preview(sanitized),
+        });
+    }
+
+    const finalText = restoreTokens(sanitized, tokens);
+    Logger.debug("Translate", "done", { messageId, chars: finalText.length, preview: preview(finalText) });
+
+    return finalText;
 }

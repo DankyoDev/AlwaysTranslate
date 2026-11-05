@@ -4,11 +4,120 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { app,IpcMainInvokeEvent } from "electron";
+import { app,IpcMainInvokeEvent,safeStorage,shell } from "electron";
 import fs from "fs/promises";
 import path from "path";
 
 const requests = new Map<string, AbortController>();
+
+// ─── Debug log file ───
+// Only written when the "Debug log" setting is enabled; the renderer decides.
+const LOG_FILE = () => path.join(app.getPath("userData"), "AlwaysTranslate.log");
+const MAX_LOG_SIZE = 5 * 1024 * 1024;
+
+async function fileSize(file: string) {
+    try {
+        return (await fs.stat(file)).size;
+    } catch {
+        return 0;
+    }
+}
+
+export async function batLogAppend(_: IpcMainInvokeEvent, text: string): Promise<boolean> {
+    try {
+        const file = LOG_FILE();
+
+        // Rotate once the file gets too big
+        if (await fileSize(file) > MAX_LOG_SIZE) {
+            const rotated = `${file}.1`;
+            await fs.rm(rotated, { force: true });
+            await fs.rename(file, rotated).catch(() => { });
+        }
+
+        await fs.appendFile(file, text, "utf-8");
+        return true;
+    } catch (e) {
+        console.error("[AlwaysTranslate] Failed to write debug log", e);
+        return false;
+    }
+}
+
+export async function batLogClear(): Promise<boolean> {
+    try {
+        await fs.writeFile(LOG_FILE(), "", "utf-8");
+        return true;
+    } catch (e) {
+        console.error("[AlwaysTranslate] Failed to clear debug log", e);
+        return false;
+    }
+}
+
+export async function batLogOpen(): Promise<string> {
+    return shell.openPath(LOG_FILE());
+}
+
+export async function batLogPath(): Promise<string> {
+    return LOG_FILE();
+}
+
+// ─── Encrypted secret storage (API keys) ───
+// Values are encrypted with the OS keychain (DPAPI on Windows) through Electron's safeStorage.
+const SECRETS_FILE = () => path.join(app.getPath("userData"), "AlwaysTranslateSecrets.json");
+
+async function readSecrets(): Promise<Record<string, string>> {
+    try {
+        return JSON.parse(await fs.readFile(SECRETS_FILE(), "utf-8"));
+    } catch {
+        return {};
+    }
+}
+
+async function writeSecrets(data: Record<string, string>) {
+    const file = SECRETS_FILE();
+    const tmp = `${file}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(data, null, 4), "utf-8");
+    await fs.rename(tmp, file);
+}
+
+export function batSecretAvailable() {
+    try {
+        return safeStorage.isEncryptionAvailable();
+    } catch {
+        return false;
+    }
+}
+
+export async function batSecretGet(_: IpcMainInvokeEvent, name: string): Promise<string> {
+    if (!batSecretAvailable()) return "";
+
+    try {
+        const data = await readSecrets();
+        const encoded = data[name];
+        if (!encoded) return "";
+
+        return safeStorage.decryptString(Buffer.from(encoded, "base64"));
+    } catch (e) {
+        console.error("[AlwaysTranslate] Failed to read secret", name, e);
+        return "";
+    }
+}
+
+export async function batSecretSet(_: IpcMainInvokeEvent, name: string, value: string): Promise<boolean> {
+    if (!batSecretAvailable()) return false;
+
+    try {
+        const data = await readSecrets();
+
+        if (!value) delete data[name];
+        else data[name] = safeStorage.encryptString(value).toString("base64");
+
+        await writeSecrets(data);
+        return true;
+    } catch (e) {
+        console.error("[AlwaysTranslate] Failed to store secret", name, e);
+        return false;
+    }
+}
 
 async function translationFetch(event: IpcMainInvokeEvent, requestId: string, url: string, init: RequestInit, timeout: number) {
     const key = event.sender.id + ":" + requestId;

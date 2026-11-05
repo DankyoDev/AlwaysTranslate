@@ -8,7 +8,7 @@ import { PluginNative } from "@utils/types";
 
 import { GEMINI_TEMPERATURE } from "../constants";
 import { type GeminiQuotaKind, settings } from "../settings";
-import { Logger } from "../utils/logger";
+import { Logger, preview } from "../utils/logger";
 import { httpError } from "./errors";
 import { buildBatchTranslationPrompt, buildBatchUserPromptContext } from "./geminiPrompt";
 import { nativeRequest } from "./nativeRequest";
@@ -77,6 +77,17 @@ async function fetchGeminiAPI(payload: any, engine: string, apiKey: string, sign
 
     const apiUrl = getApiUrl(engine);
 
+    const systemPrompt = payload?.systemInstruction?.parts?.[0]?.text ?? "";
+    const userPrompt = payload?.contents?.[0]?.parts?.[0]?.text ?? "";
+
+    Logger.debug("Gemini", "request", {
+        model: apiUrl.split("/models/")[1]?.split(":")[0] ?? engine,
+        systemPromptChars: systemPrompt.length,
+        userPromptChars: userPrompt.length,
+        systemPrompt: preview(systemPrompt, 2500),
+        userPrompt: preview(userPrompt, 2500),
+    });
+
     let res;
     try {
         res = await nativeRequest(id => Native.batGeminiFetch(apiUrl, apiKey, JSON.stringify(payload), id), signal);
@@ -135,6 +146,7 @@ async function fetchGeminiAPI(payload: any, engine: string, apiKey: string, sign
             throw new Error(data?.promptFeedback?.blockReason || ["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST"].includes(data?.candidates?.[0]?.finishReason) ? "Response blocked by safety filters" : "Empty response from Gemini API");
         }
 
+        Logger.debug("Gemini", "raw response", { chars: text.length, text: preview(text, 2000) });
         return text.trim();
     } catch (e: any) {
         if (e.message?.includes("Quota Exceeded")) throw e;
@@ -154,10 +166,11 @@ export async function translateBatchWithGemini(
     apiKey: string,
     customPrompt: string,
     engine: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    context?: string
 ): Promise<{ id: string, text: string }[]> {
-    const systemInstruction = buildBatchTranslationPrompt(targetLang, customPrompt);
-    const userPrompt = buildBatchUserPromptContext(messagesToTranslate);
+    const systemInstruction = buildBatchTranslationPrompt(targetLang, customPrompt, !!context);
+    const userPrompt = buildBatchUserPromptContext(messagesToTranslate, context);
 
     const payload = {
         systemInstruction: { parts: [{ text: systemInstruction }] },
